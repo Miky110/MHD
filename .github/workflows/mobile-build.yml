@@ -1,0 +1,60 @@
+name: Sestavení mobilních aplikací
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Vytvořit nativní platformy
+        run: flutter create --project-name mhd_mikylov --org cz.mikylov .
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - name: Sestavit APK
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MHD-Mikylov-Android-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  ios:
+    name: iOS nepodepsaný balíček
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Vytvořit nativní platformy
+        run: flutter create --project-name mhd_mikylov --org cz.mikylov .
+      - run: flutter pub get
+      - name: Sestavit iOS bez podpisu
+        run: flutter build ios --release --no-codesign
+      - name: Zabalit aplikaci jako nepodepsané IPA
+        run: |
+          mkdir -p build/ios/ipa/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
+          cd build/ios/ipa
+          zip -r MHD-Mikylov-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MHD-Mikylov-iOS-unsigned
+          path: build/ios/ipa/MHD-Mikylov-unsigned.ipa
+          if-no-files-found: error
