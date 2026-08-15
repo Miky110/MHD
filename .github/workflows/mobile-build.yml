@@ -36,8 +36,13 @@ jobs:
           if-no-files-found: error
 
   ios:
-    name: iOS nepodepsaný balíček
+    name: iOS App Store IPA
     runs-on: macos-latest
+    env:
+      BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+      BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -49,16 +54,29 @@ jobs:
       - name: Povolit GPS
         run: bash scripts/configure_permissions.sh
       - run: flutter pub get
-      - name: Sestavit iOS bez podpisu
-        run: flutter build ios --release --no-codesign
-      - name: Zabalit aplikaci jako nepodepsané IPA
+      - name: Nastavit Bundle ID
         run: |
-          mkdir -p build/ios/ipa/Payload
-          cp -R build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
-          cd build/ios/ipa
-          zip -r MHD-Mikylov-unsigned.ipa Payload
+          sed -i '' 's/cz\.mikylov\.mhdMikylov/mhdm/g' ios/Runner.xcodeproj/project.pbxproj
+          perl -0pi -e 's/PRODUCT_BUNDLE_IDENTIFIER = mhdm;/PRODUCT_BUNDLE_IDENTIFIER = mhdm;\n\t\t\t\tDEVELOPMENT_TEAM = WB84UM9423;\n\t\t\t\tCODE_SIGN_STYLE = Manual;\n\t\t\t\tCODE_SIGN_IDENTITY = "Apple Distribution";\n\t\t\t\tPROVISIONING_PROFILE_SPECIFIER = mhdm;/g' ios/Runner.xcodeproj/project.pbxproj
+      - name: Nainstalovat distribuční certifikát a profil
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/build_certificate.p12"
+          PROFILE_PATH="$RUNNER_TEMP/mhdm.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo -n "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/22864e47-4ee8-44b1-9e53-9c60c8ac428b.mobileprovision"
+      - name: Sestavit podepsané IPA pro App Store Connect
+        run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
       - uses: actions/upload-artifact@v4
         with:
-          name: MHD-Mikylov-iOS-unsigned
-          path: build/ios/ipa/MHD-Mikylov-unsigned.ipa
+          name: MHD-Mikylov-iOS-App-Store
+          path: build/ios/ipa/*.ipa
           if-no-files-found: error
