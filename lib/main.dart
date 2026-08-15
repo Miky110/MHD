@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:mhd_mikylov/database.dart';
 import 'package:mhd_mikylov/gtfs_importer.dart';
 import 'package:mhd_mikylov/server_sync.dart';
@@ -45,6 +46,15 @@ class TransitLine {
   final String? carrier;
 }
 
+class DriverInfo {
+  const DriverInfo(
+      {required this.id, required this.name, required this.pin, this.phone});
+  final String id;
+  final String name;
+  final String pin;
+  final String? phone;
+}
+
 const demoLines = <TransitLine>[
   TransitLine('1', 'Sokolov, terminál', Color(0xFFE53935), [
     Stop('Bukovany, sídliště', 0, 50.1666, 12.5728),
@@ -75,11 +85,15 @@ class TransitDataController extends ChangeNotifier {
   List<TransitLine> lines = List.of(demoLines);
   List<Stop> stops = demoLines.expand((line) => line.stops).toSet().toList();
   bool loadedFromServer = false;
+  List<DriverInfo> drivers = const [];
+  Map<String, String> lineGongs = const {};
 
   Future<void> loadFromServer() async {
     if (!serverSync.isReady) return;
     final stopRows = await serverSync.fetchStops();
     final lineRows = await serverSync.fetchLines();
+    final driverRows = await serverSync.fetchDrivers();
+    lineGongs = await serverSync.fetchLineGongs();
     final byId = <String, Stop>{};
     for (final row in stopRows) {
       final types = row['type'];
@@ -116,6 +130,14 @@ class TransitDataController extends ChangeNotifier {
     }
     stops = byId.values.toList(growable: false);
     if (loadedLines.isNotEmpty) lines = loadedLines;
+    drivers = driverRows
+        .map((row) => DriverInfo(
+              id: '${row['id']}',
+              name: row['name'] as String? ?? 'Neznámý řidič',
+              pin: '${row['pin'] ?? ''}',
+              phone: row['phone'] as String?,
+            ))
+        .toList(growable: false);
     loadedFromServer = true;
     notifyListeners();
   }
@@ -134,6 +156,7 @@ class ActiveTripController extends ChangeNotifier {
   int stopIndex = 0;
   bool running = false;
   bool _applyingRemoteState = false;
+  DriverInfo? driver;
 
   Stop get current => line.stops[stopIndex];
   Stop? get next =>
@@ -157,6 +180,7 @@ class ActiveTripController extends ChangeNotifier {
       required lineNumber,
       required stopIndex,
       required running,
+      String? driverId,
     }) {
       final remoteLine = lines.firstWhere(
         (item) => item.number == lineNumber,
@@ -166,6 +190,10 @@ class ActiveTripController extends ChangeNotifier {
       line = remoteLine;
       this.stopIndex = stopIndex.clamp(0, line.stops.length - 1);
       this.running = running;
+      driver = null;
+      for (final item in transitData.drivers) {
+        if (item.id == driverId) driver = item;
+      }
       notifyListeners();
       appDatabase.saveActiveTrip(
         lineNumber: line.number,
@@ -191,8 +219,20 @@ class ActiveTripController extends ChangeNotifier {
         lineNumber: line.number,
         stopIndex: stopIndex,
         running: running,
+        driverId: driver?.id,
       );
     }
+  }
+
+  void selectDriver(DriverInfo selectedDriver) {
+    driver = selectedDriver;
+    notifyListeners();
+    serverSync.publishTrip(
+      lineNumber: line.number,
+      stopIndex: stopIndex,
+      running: running,
+      driverId: driver?.id,
+    );
   }
 }
 
@@ -213,7 +253,7 @@ class MikylovApp extends StatelessWidget {
       ),
       home: const ModeSelectionScreen(),
       routes: {
-        '/driver': (_) => const DriverScreen(),
+        '/driver': (_) => const DriverLoginScreen(),
         '/passenger': (_) => const PassengerScreen(),
         // Skrytá systémová trasa. Otevírá ji integrace vozidla nebo Nastoupit.
         '/onboard': (_) => const OnboardScreen(),
@@ -551,6 +591,98 @@ class _AdminScreenState extends State<AdminScreen> {
     }
   }
 
+  Future<void> _editDriver([DriverInfo? driver]) async {
+    final name = TextEditingController(text: driver?.name ?? '');
+    final phone = TextEditingController(text: driver?.phone ?? '');
+    final pin = TextEditingController(text: driver?.pin ?? '');
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(driver == null ? 'Přidat řidiče' : 'Upravit řidiče'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: name,
+              decoration: const InputDecoration(labelText: 'Jméno a příjmení')),
+          TextField(
+              controller: phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(labelText: 'Telefon')),
+          TextField(
+              controller: pin,
+              obscureText: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'PIN')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Zrušit')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Uložit')),
+        ],
+      ),
+    );
+    if (save == true && name.text.trim().isNotEmpty && pin.text.isNotEmpty) {
+      try {
+        await serverSync.saveDriver({
+          if (driver != null) 'id': driver.id,
+          'name': name.text.trim(),
+          'phone': phone.text.trim().isEmpty ? null : phone.text.trim(),
+          'pin': pin.text,
+        });
+        await _refreshTransit();
+      } catch (error) {
+        if (mounted) setState(() => _error = '$error');
+      }
+    }
+    name.dispose();
+    phone.dispose();
+    pin.dispose();
+  }
+
+  Future<void> _deleteDriver(DriverInfo driver) async {
+    try {
+      await serverSync.deleteDriver(driver.id);
+      await _refreshTransit();
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
+  Future<void> _editGong(TransitLine line) async {
+    if (line.id == null) return;
+    final url =
+        TextEditingController(text: transitData.lineGongs[line.id] ?? '');
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Gong linky ${line.number}'),
+        content: TextField(
+          controller: url,
+          decoration: const InputDecoration(labelText: 'Veřejná URL MP3 gongu'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Zrušit')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Uložit')),
+        ],
+      ),
+    );
+    if (save == true && url.text.trim().isNotEmpty) {
+      try {
+        await serverSync.saveLineGong(line.id!, url.text.trim());
+        await _refreshTransit();
+      } catch (error) {
+        if (mounted) setState(() => _error = '$error');
+      }
+    }
+    url.dispose();
+  }
+
   Future<void> _import(GtfsSource source) async {
     setState(() {
       _importing = source.url;
@@ -558,6 +690,12 @@ class _AdminScreenState extends State<AdminScreen> {
     });
     try {
       final result = await _importer.import(source);
+      if (source.url.contains('data.pid.cz')) {
+        await serverSync.importPragueData(
+          stops: result.stops,
+          routes: result.routes,
+        );
+      }
       await appDatabase.saveGtfsImport(
         sourceUrl: source.url,
         sourceName: source.name,
@@ -609,6 +747,9 @@ class _AdminScreenState extends State<AdminScreen> {
                       '${line.stops.length} zastávek • ${line.carrier ?? 'bez dopravce'}'),
                   trailing: Wrap(spacing: 2, children: [
                     IconButton(
+                        onPressed: () => _editGong(line),
+                        icon: const Icon(Icons.audiotrack_outlined)),
+                    IconButton(
                         onPressed: () => _editLine(line),
                         icon: const Icon(Icons.edit_outlined)),
                     IconButton(
@@ -643,6 +784,37 @@ class _AdminScreenState extends State<AdminScreen> {
                         icon: const Icon(Icons.edit_outlined)),
                     IconButton(
                         onPressed: () => _deleteStop(stop),
+                        icon: const Icon(Icons.delete_outline),
+                        color: Colors.redAccent),
+                  ]),
+                ),
+              )),
+          const SizedBox(height: 22),
+          Row(children: [
+            const Expanded(
+              child: Text('Řidiči a PINy',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+            ),
+            FilledButton.icon(
+              onPressed: () => _editDriver(),
+              icon: const Icon(Icons.person_add_alt),
+              label: const Text('Řidič'),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          ...transitData.drivers.map((driver) => Card(
+                child: ListTile(
+                  leading: const Icon(Icons.badge_outlined),
+                  title: Text(driver.name),
+                  subtitle: Text(driver.phone?.isNotEmpty == true
+                      ? '${driver.phone} • PIN nastaven'
+                      : 'Bez telefonu • PIN nastaven'),
+                  trailing: Wrap(spacing: 2, children: [
+                    IconButton(
+                        onPressed: () => _editDriver(driver),
+                        icon: const Icon(Icons.edit_outlined)),
+                    IconButton(
+                        onPressed: () => _deleteDriver(driver),
                         icon: const Icon(Icons.delete_outline),
                         color: Colors.redAccent),
                   ]),
@@ -884,6 +1056,18 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                       ),
                     )),
               ],
+              if (activeTrip.driver != null) ...[
+                const SizedBox(height: 16),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.person_outline),
+                    title: Text(activeTrip.driver!.name),
+                    subtitle: Text(activeTrip.driver!.phone?.isNotEmpty == true
+                        ? 'Řidič spoje • ${activeTrip.driver!.phone}'
+                        : 'Řidič spoje'),
+                  ),
+                ),
+              ],
               const SizedBox(height: 12),
               FilledButton.icon(
                 onPressed: activeTrip.running
@@ -975,6 +1159,15 @@ class OnboardScreen extends StatelessWidget {
                     value: trip.stopIndex / (trip.line.stops.length - 1),
                     minHeight: 10,
                   ),
+                  if (trip.driver != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 12),
+                      child: Text(
+                        'Řidič: ${trip.driver!.name}${trip.driver!.phone?.isNotEmpty == true ? ' • ${trip.driver!.phone}' : ''}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    ),
                   const SizedBox(height: 20),
                   Expanded(
                     child: ListView.builder(
@@ -1000,6 +1193,72 @@ class OnboardScreen extends StatelessWidget {
   }
 }
 
+class DriverLoginScreen extends StatefulWidget {
+  const DriverLoginScreen({super.key});
+
+  @override
+  State<DriverLoginScreen> createState() => _DriverLoginScreenState();
+}
+
+class _DriverLoginScreenState extends State<DriverLoginScreen> {
+  DriverInfo? _driver;
+  final _pin = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _pin.dispose();
+    super.dispose();
+  }
+
+  void _login() {
+    if (_driver == null || _pin.text != _driver!.pin) {
+      setState(() => _error = 'Nesprávný řidič nebo PIN.');
+      return;
+    }
+    activeTrip.selectDriver(_driver!);
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const DriverScreen()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Přihlášení řidiče')),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          DropdownButtonFormField<DriverInfo>(
+            decoration: const InputDecoration(
+                labelText: 'Řidič', border: OutlineInputBorder()),
+            items: transitData.drivers
+                .map((driver) =>
+                    DropdownMenuItem(value: driver, child: Text(driver.name)))
+                .toList(),
+            onChanged: (value) => setState(() => _driver = value),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _pin,
+            obscureText: true,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: 'PIN',
+              border: const OutlineInputBorder(),
+              errorText: _error,
+            ),
+            onSubmitted: (_) => _login(),
+          ),
+          const SizedBox(height: 18),
+          FilledButton(onPressed: _login, child: const Text('PŘIHLÁSIT')),
+        ],
+      ),
+    );
+  }
+}
+
 class DriverScreen extends StatefulWidget {
   const DriverScreen({super.key});
 
@@ -1009,6 +1268,7 @@ class DriverScreen extends StatefulWidget {
 
 class _DriverScreenState extends State<DriverScreen> {
   final FlutterTts _tts = FlutterTts();
+  final AudioPlayer _gongPlayer = AudioPlayer();
   TransitLine _line = lines.first;
   int _stopIndex = 0;
   bool _running = false;
@@ -1051,8 +1311,26 @@ class _DriverScreenState extends State<DriverScreen> {
     await _tts.speak(text);
   }
 
-  Future<void> _announceArrival() =>
-      _speak('Aktuální zastávka ${_current.name}.');
+  Future<void> _announceArrival() async {
+    final lineId = _line.id;
+    final gongUrl = lineId == null ? null : transitData.lineGongs[lineId];
+    if (gongUrl != null && gongUrl.isNotEmpty) {
+      try {
+        await _gongPlayer.setUrl(gongUrl);
+        await _gongPlayer.play();
+      } catch (_) {
+        // Hlášení názvu zastávky pokračuje i při nedostupném gongu.
+      }
+    }
+    await _speak('${_current.name}.');
+  }
+
+  @override
+  void dispose() {
+    _gongPlayer.dispose();
+    _tts.stop();
+    super.dispose();
+  }
 
   Future<void> _depart() async {
     if (_next == null) {

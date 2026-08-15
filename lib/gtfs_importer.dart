@@ -18,12 +18,16 @@ class GtfsImportResult {
     required this.stopCount,
     required this.stationCount,
     required this.routeCount,
+    this.stops = const [],
+    this.routes = const [],
   });
 
   final GtfsSource source;
   final int stopCount;
   final int stationCount;
   final int routeCount;
+  final List<Map<String, dynamic>> stops;
+  final List<Map<String, dynamic>> routes;
 }
 
 const gtfsSources = <GtfsSource>[
@@ -65,7 +69,23 @@ class GtfsImporter {
       stopCount: stops.length - 1,
       stationCount: stationCount,
       routeCount: routes.length - 1,
+      stops: _rowsAsMaps(stops),
+      routes: _rowsAsMaps(routes),
     );
+  }
+
+  List<Map<String, dynamic>> _rowsAsMaps(List<List<dynamic>> rows) {
+    if (rows.isEmpty) return [];
+    final headers = rows.first.map((value) => '$value').toList();
+    return rows.skip(1).map((row) {
+      final record = <String, dynamic>{};
+      for (var index = 0;
+          index < headers.length && index < row.length;
+          index++) {
+        record[headers[index]] = '${row[index]}';
+      }
+      return record;
+    }).toList(growable: false);
   }
 
   List<List<dynamic>> _readCsv(Archive archive, String name) {

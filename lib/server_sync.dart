@@ -6,6 +6,7 @@ typedef RemoteTripHandler = void Function({
   required String lineNumber,
   required int stopIndex,
   required bool running,
+  String? driverId,
 });
 
 class ServerSyncService {
@@ -36,6 +37,7 @@ class ServerSyncService {
     required String lineNumber,
     required int stopIndex,
     required bool running,
+    String? driverId,
   }) async {
     if (!_initialized) return;
     await _client.from('active_trips').upsert({
@@ -43,6 +45,7 @@ class ServerSyncService {
       'line_number': lineNumber,
       'stop_index': stopIndex,
       'running': running,
+      'driver_id': driverId,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     });
   }
@@ -79,6 +82,73 @@ class ServerSyncService {
     await _client.from('lines').delete().eq('id', id);
   }
 
+  Future<List<Map<String, dynamic>>> fetchDrivers() async {
+    if (!_initialized) return [];
+    final rows = await _client.from('drivers').select().order('name');
+    return List<Map<String, dynamic>>.from(rows);
+  }
+
+  Future<void> saveDriver(Map<String, dynamic> driver) async {
+    if (!_initialized) return;
+    await _client.from('drivers').upsert(driver);
+  }
+
+  Future<void> deleteDriver(String id) async {
+    if (!_initialized) return;
+    await _client.from('drivers').delete().eq('id', id);
+  }
+
+  Future<Map<String, String>> fetchLineGongs() async {
+    if (!_initialized) return {};
+    final rows = await _client.from('line_gongs').select();
+    return {
+      for (final row in rows) '${row['line_id']}': '${row['audio_url']}',
+    };
+  }
+
+  Future<void> saveLineGong(String lineId, String audioUrl) async {
+    if (!_initialized) return;
+    await _client.from('line_gongs').upsert({
+      'line_id': lineId,
+      'audio_url': audioUrl,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
+
+  Future<void> importPragueData({
+    required List<Map<String, dynamic>> stops,
+    required List<Map<String, dynamic>> routes,
+  }) async {
+    if (!_initialized) return;
+    await _client.from('prague_stops').delete().neq('id', '');
+    await _client.from('prague_lines').delete().neq('id', '');
+    for (var index = 0; index < stops.length; index += 500) {
+      final chunk = stops.skip(index).take(500).map((row) => {
+            'id': row['stop_id'],
+            'name': row['stop_name'],
+            'latitude': double.tryParse('${row['stop_lat']}'),
+            'longitude': double.tryParse('${row['stop_lon']}'),
+            'zone': row['zone_id'],
+            'location_type': int.tryParse('${row['location_type']}') ?? 0,
+            'parent_station': '${row['parent_station']}'.isEmpty
+                ? null
+                : row['parent_station'],
+          });
+      await _client.from('prague_stops').upsert(chunk.toList());
+    }
+    for (var index = 0; index < routes.length; index += 500) {
+      final chunk = routes.skip(index).take(500).map((row) => {
+            'id': row['route_id'],
+            'short_name': row['route_short_name'],
+            'long_name': row['route_long_name'] ?? '',
+            'route_type': int.tryParse('${row['route_type']}'),
+            'color': row['route_color'],
+            'text_color': row['route_text_color'],
+          });
+      await _client.from('prague_lines').upsert(chunk.toList());
+    }
+  }
+
   void watchTrip(RemoteTripHandler onTrip) {
     if (!_initialized) return;
     _tripSubscription?.cancel();
@@ -93,6 +163,7 @@ class ServerSyncService {
             lineNumber: row['line_number'] as String,
             stopIndex: row['stop_index'] as int,
             running: row['running'] as bool,
+            driverId: row['driver_id'] as String?,
           );
         });
   }
