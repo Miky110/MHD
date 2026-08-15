@@ -12,7 +12,7 @@ if [[ -f "$ANDROID_MANIFEST" ]] &&
   rm "$ANDROID_MANIFEST.bak"
 fi
 
-if [[ -f "$IOS_PLIST" ]] &&
+if [[ -x /usr/libexec/PlistBuddy ]] && [[ -f "$IOS_PLIST" ]] &&
   ! grep -q 'NSLocationWhenInUseUsageDescription' "$IOS_PLIST"; then
   /usr/libexec/PlistBuddy -c 'Add :NSLocationWhenInUseUsageDescription string MHD Mikylov používá polohu k nalezení nejbližší zastávky a automatickému hlášení.' "$IOS_PLIST"
 fi
