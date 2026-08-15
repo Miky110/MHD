@@ -47,6 +47,38 @@ class ServerSyncService {
     });
   }
 
+  Future<List<Map<String, dynamic>>> fetchStops() async {
+    if (!_initialized) return [];
+    final rows = await _client.from('stops').select().order('name');
+    return List<Map<String, dynamic>>.from(rows);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchLines() async {
+    if (!_initialized) return [];
+    final rows = await _client.from('lines').select().order('name');
+    return List<Map<String, dynamic>>.from(rows);
+  }
+
+  Future<void> saveStop(Map<String, dynamic> stop) async {
+    if (!_initialized) return;
+    await _client.from('stops').upsert(stop);
+  }
+
+  Future<void> deleteStop(String id) async {
+    if (!_initialized) return;
+    await _client.from('stops').delete().eq('id', id);
+  }
+
+  Future<void> saveLine(Map<String, dynamic> line) async {
+    if (!_initialized) return;
+    await _client.from('lines').upsert(line);
+  }
+
+  Future<void> deleteLine(String id) async {
+    if (!_initialized) return;
+    await _client.from('lines').delete().eq('id', id);
+  }
+
   void watchTrip(RemoteTripHandler onTrip) {
     if (!_initialized) return;
     _tripSubscription?.cancel();
