@@ -74,7 +74,7 @@ jobs:
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
           cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/22864e47-4ee8-44b1-9e53-9c60c8ac428b.mobileprovision"
       - name: Sestavit podepsané IPA pro App Store Connect
-        run: flutter build ipa --release --export-options-plist=ios/ExportOptions.plist
+        run: flutter build ipa --release --build-number="${{ github.run_number }}" --export-options-plist=ios/ExportOptions.plist
       - uses: actions/upload-artifact@v4
         with:
           name: MHD-Mikylov-iOS-App-Store
