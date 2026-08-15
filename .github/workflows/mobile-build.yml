@@ -22,6 +22,8 @@ jobs:
           cache: true
       - name: Vytvořit nativní platformy
         run: flutter create --project-name mhd_mikylov --org cz.mikylov .
+      - name: Povolit GPS
+        run: bash scripts/configure_permissions.sh
       - run: flutter pub get
       - run: flutter analyze
       - run: flutter test
@@ -44,6 +46,8 @@ jobs:
           cache: true
       - name: Vytvořit nativní platformy
         run: flutter create --project-name mhd_mikylov --org cz.mikylov .
+      - name: Povolit GPS
+        run: bash scripts/configure_permissions.sh
       - run: flutter pub get
       - name: Sestavit iOS bez podpisu
         run: flutter build ios --release --no-codesign
