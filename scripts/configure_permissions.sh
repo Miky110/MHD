@@ -12,7 +12,12 @@ if [[ -f "$ANDROID_MANIFEST" ]] &&
   rm "$ANDROID_MANIFEST.bak"
 fi
 
-if [[ -x /usr/libexec/PlistBuddy ]] && [[ -f "$IOS_PLIST" ]] &&
-  ! grep -q 'NSLocationWhenInUseUsageDescription' "$IOS_PLIST"; then
-  /usr/libexec/PlistBuddy -c 'Add :NSLocationWhenInUseUsageDescription string MHD Mikylov používá polohu k nalezení nejbližší zastávky a automatickému hlášení.' "$IOS_PLIST"
+if [[ -x /usr/libexec/PlistBuddy ]] && [[ -f "$IOS_PLIST" ]]; then
+  if ! /usr/libexec/PlistBuddy -c 'Print :NSLocationWhenInUseUsageDescription' "$IOS_PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c 'Add :NSLocationWhenInUseUsageDescription string MHD Mikylov používá vaši polohu k nalezení nejbližší zastávky a zobrazení správných odjezdů.' "$IOS_PLIST"
+  fi
+
+  if ! /usr/libexec/PlistBuddy -c 'Print :NSLocationAlwaysAndWhenInUseUsageDescription' "$IOS_PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c 'Add :NSLocationAlwaysAndWhenInUseUsageDescription string V režimu řidiče používá MHD Mikylov polohu během aktivní jízdy k automatickému rozpoznání příjezdu do zastávky a přehrání správného hlášení, i když aplikace není právě na obrazovce.' "$IOS_PLIST"
+  fi
 fi
