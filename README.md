@@ -29,4 +29,19 @@ flutter pub get
 flutter run
 ```
 
+## Serverová synchronizace
+
+Databázové schéma je v `supabase/migrations/001_initial_schema.sql`. Aplikace je
+ve výchozím nastavení připojená k projektu MHD Mikylov. Hodnoty lze pro jiné
+prostředí přepsat při sestavení:
+
+```bash
+flutter build apk --release \
+  --dart-define=SUPABASE_URL=https://PROJECT.supabase.co \
+  --dart-define=SUPABASE_PUBLISHABLE_KEY=PUBLIC_KEY
+```
+
+Bez těchto hodnot aplikace bezpečně pokračuje pouze s lokální SQLite databází.
+Do mobilní aplikace nikdy nevkládej `service_role` nebo jiný tajný serverový klíč.
+
 Nativní adresáře `android/` a `ios/` se v CI vytvářejí automaticky, aby se verzoval jen udržovaný společný zdrojový kód.
