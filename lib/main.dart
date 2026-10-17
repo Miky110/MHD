@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -50,6 +51,7 @@ class TransitLine {
     this.id,
     this.type,
     this.carrier,
+    this.reverseStops = const [],
   ]);
   final String number;
   final String destination;
@@ -58,6 +60,7 @@ class TransitLine {
   final String? id;
   final String? type;
   final String? carrier;
+  final List<Stop> reverseStops;
 }
 
 class DriverInfo {
@@ -122,10 +125,39 @@ class TransitDataController extends ChangeNotifier {
 
   Future<void> loadFromServer() async {
     if (!serverSync.isReady) return;
-    final stopRows = await serverSync.fetchStops();
-    final lineRows = await serverSync.fetchLines();
-    final driverRows = await serverSync.fetchDrivers();
-    lineGongs = await serverSync.fetchLineGongs();
+    List<Map<String, dynamic>> stopRows;
+    List<Map<String, dynamic>> lineRows;
+    List<Map<String, dynamic>> driverRows;
+    try {
+      stopRows = await serverSync.fetchStops();
+      lineRows = await serverSync.fetchLines();
+      driverRows = await serverSync.fetchDrivers();
+      lineGongs = await serverSync.fetchLineGongs();
+      await appDatabase.saveCache('stops', stopRows);
+      await appDatabase.saveCache('lines', lineRows);
+      await appDatabase.saveCache('drivers', driverRows);
+      await appDatabase.saveCache('line_gongs', lineGongs);
+    } catch (_) {
+      stopRows =
+          (await appDatabase.loadCache<List<dynamic>>('stops') ?? const [])
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+      lineRows =
+          (await appDatabase.loadCache<List<dynamic>>('lines') ?? const [])
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+      driverRows =
+          (await appDatabase.loadCache<List<dynamic>>('drivers') ?? const [])
+              .whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList();
+      lineGongs = Map<String, String>.from(
+        await appDatabase.loadCache<Map<String, dynamic>>('line_gongs') ??
+            const {},
+      );
+    }
     final byId = <String, Stop>{};
     for (final row in stopRows) {
       final types = row['type'];
@@ -150,6 +182,13 @@ class TransitDataController extends ChangeNotifier {
           .whereType<Stop>()
           .toList(growable: false);
       if (routeStops.isEmpty) continue;
+      final reverseIds = (row['routeReverse'] as List? ?? const [])
+          .map((value) => '$value')
+          .toList();
+      final reverseStops = reverseIds
+          .map((id) => byId[id])
+          .whereType<Stop>()
+          .toList(growable: false);
       loadedLines.add(
         TransitLine(
           row['name'] as String? ?? '?',
@@ -159,6 +198,7 @@ class TransitDataController extends ChangeNotifier {
           '${row['id']}',
           row['type'] as String?,
           row['carrier'] as String?,
+          reverseStops,
         ),
       );
     }
@@ -193,13 +233,22 @@ class ActiveTripController extends ChangeNotifier {
   int startStopIndex = 0;
   int endStopIndex = lines.first.stops.length - 1;
   bool running = false;
+  String direction = 'forward';
+  int delayMinutes = 0;
+  String occupancy = 'low';
+  bool stopRequested = false;
+  String? alertText;
   bool _applyingRemoteState = false;
   DriverInfo? driver;
 
-  Stop get current => line.stops[stopIndex];
+  List<Stop> get routeStops =>
+      direction == 'reverse' && line.reverseStops.isNotEmpty
+          ? line.reverseStops
+          : line.stops;
+  Stop get current => routeStops[stopIndex];
   Stop? get next =>
-      stopIndex + 1 <= endStopIndex && stopIndex + 1 < line.stops.length
-          ? line.stops[stopIndex + 1]
+      stopIndex + 1 <= endStopIndex && stopIndex + 1 < routeStops.length
+          ? routeStops[stopIndex + 1]
           : null;
 
   Future<void> restore() async {
@@ -224,6 +273,11 @@ class ActiveTripController extends ChangeNotifier {
       required startStopIndex,
       required endStopIndex,
       required running,
+      required direction,
+      required delayMinutes,
+      required occupancy,
+      required stopRequested,
+      String? alertText,
       String? driverId,
     }) {
       final remoteLine = lines.firstWhere(
@@ -232,12 +286,18 @@ class ActiveTripController extends ChangeNotifier {
       );
       _applyingRemoteState = true;
       line = remoteLine;
-      this.stopIndex = stopIndex.clamp(0, line.stops.length - 1);
-      this.startStopIndex = startStopIndex.clamp(0, line.stops.length - 1);
+      this.direction = direction;
+      final routeLength = routeStops.length;
+      this.stopIndex = stopIndex.clamp(0, routeLength - 1);
+      this.startStopIndex = startStopIndex.clamp(0, routeLength - 1);
       this.endStopIndex = endStopIndex <= 0
-          ? line.stops.length - 1
-          : endStopIndex.clamp(this.startStopIndex, line.stops.length - 1);
+          ? routeLength - 1
+          : endStopIndex.clamp(this.startStopIndex, routeLength - 1);
       this.running = running;
+      this.delayMinutes = delayMinutes;
+      this.occupancy = occupancy;
+      this.stopRequested = stopRequested;
+      this.alertText = alertText;
       driver = null;
       for (final item in transitData.drivers) {
         if (item.id == driverId) driver = item;
@@ -258,11 +318,21 @@ class ActiveTripController extends ChangeNotifier {
     bool isRunning, {
     int? startStopIndex,
     int? endStopIndex,
+    String? direction,
+    int? delayMinutes,
+    String? occupancy,
+    bool? stopRequested,
+    String? alertText,
   }) {
     line = newLine;
     stopIndex = newStopIndex;
     this.startStopIndex = startStopIndex ?? this.startStopIndex;
     this.endStopIndex = endStopIndex ?? this.endStopIndex;
+    this.direction = direction ?? this.direction;
+    this.delayMinutes = delayMinutes ?? this.delayMinutes;
+    this.occupancy = occupancy ?? this.occupancy;
+    this.stopRequested = stopRequested ?? this.stopRequested;
+    this.alertText = alertText;
     running = isRunning;
     notifyListeners();
     appDatabase.saveActiveTrip(
@@ -277,6 +347,11 @@ class ActiveTripController extends ChangeNotifier {
         startStopIndex: this.startStopIndex,
         endStopIndex: this.endStopIndex,
         running: running,
+        direction: this.direction,
+        delayMinutes: this.delayMinutes,
+        occupancy: this.occupancy,
+        stopRequested: this.stopRequested,
+        alertText: this.alertText,
         driverId: driver?.id,
       );
     }
@@ -1086,12 +1161,50 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
   String? _locationError;
   String? _departuresError;
   List<DepartureInfo> _departures = const [];
+  Set<String> _favoriteStopIds = {};
+  List<Map<String, Object?>> _history = const [];
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
+    _loadPassengerData();
     _findNearestStop();
+  }
+
+  Future<void> _loadPassengerData() async {
+    final favorites =
+        await appDatabase.loadSetting<List<dynamic>>('favorite_stops') ??
+            const [];
+    final history = await appDatabase.loadTripHistory('passenger');
+    if (!mounted) return;
+    setState(() {
+      _favoriteStopIds = favorites.map((value) => '$value').toSet();
+      _history = history;
+    });
+  }
+
+  Future<void> _toggleFavorite() async {
+    final id = _nearestStop?.id;
+    if (id == null) return;
+    setState(() {
+      if (!_favoriteStopIds.add(id)) _favoriteStopIds.remove(id);
+    });
+    await appDatabase.saveSetting('favorite_stops', _favoriteStopIds.toList());
+  }
+
+  Future<void> _boardCurrentTrip() async {
+    await appDatabase.addTripHistory(
+      role: 'passenger',
+      lineNumber: activeTrip.line.number,
+      originName: _nearestStop?.name ?? activeTrip.current.name,
+      destinationName: activeTrip.routeStops[activeTrip.endStopIndex].name,
+      startedAt: DateTime.now(),
+      delayMinutes: activeTrip.delayMinutes,
+      direction: activeTrip.direction,
+    );
+    if (!mounted) return;
+    Navigator.pushNamed(context, '/onboard');
   }
 
   Future<void> _findNearestStop() async {
@@ -1154,47 +1267,65 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
   Future<List<DepartureInfo>> _loadDepartures(Stop stop) async {
     try {
       final rows = await serverSync.fetchDepartures();
-      final departures = <DepartureInfo>[];
-      for (final row in rows) {
-        final lineId = '${row['line_id'] ?? ''}';
-        TransitLine? line;
-        for (final candidate in lines) {
-          if (candidate.id == lineId) line = candidate;
-        }
-        if (line == null) continue;
-
-        final reversed = row['is_reversed'] == true;
-        final route = reversed ? line.stops.reversed.toList() : line.stops;
-        final stopIndex = route.indexWhere(
-          (item) => item.id == stop.id || item.name == stop.name,
-        );
-        if (stopIndex < 0) continue;
-        final startIndex = (row['start_stop_index'] as num?)?.toInt() ?? 0;
-        final endIndex =
-            (row['end_stop_index'] as num?)?.toInt() ?? route.length - 1;
-        if (stopIndex < startIndex || stopIndex > endIndex) continue;
-
-        final rawTime = row['_source'] == 'scheduled_departures'
-            ? row['departure_time']
-            : row['start_time'];
-        final departureTime = DateTime.tryParse('$rawTime')?.toLocal();
-        if (departureTime == null) continue;
-        departures.add(
-          DepartureInfo(
-            line: line,
-            departureTime: departureTime,
-            destination: route[endIndex.clamp(0, route.length - 1)].name,
-            status: '${row['status'] ?? 'scheduled'}',
-          ),
-        );
-      }
-      departures.sort((a, b) => a.departureTime.compareTo(b.departureTime));
-      return departures;
+      await appDatabase.saveCache('departures', rows);
+      return _mapDepartures(rows, stop);
     } catch (error) {
+      final cached =
+          await appDatabase.loadCache<List<dynamic>>('departures') ?? const [];
+      final rows = cached
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+      if (rows.isNotEmpty) {
+        _departuresError = 'Offline režim – zobrazuji naposledy uložená data.';
+        return _mapDepartures(rows, stop);
+      }
       _departuresError =
           'Odjezdy se nepodařilo načíst z databáze: ${error.toString()}';
       return const [];
     }
+  }
+
+  List<DepartureInfo> _mapDepartures(
+    List<Map<String, dynamic>> rows,
+    Stop stop,
+  ) {
+    final departures = <DepartureInfo>[];
+    for (final row in rows) {
+      final lineId = '${row['line_id'] ?? ''}';
+      TransitLine? line;
+      for (final candidate in lines) {
+        if (candidate.id == lineId) line = candidate;
+      }
+      if (line == null) continue;
+
+      final reversed = row['is_reversed'] == true;
+      final route = reversed ? line.stops.reversed.toList() : line.stops;
+      final stopIndex = route.indexWhere(
+        (item) => item.id == stop.id || item.name == stop.name,
+      );
+      if (stopIndex < 0) continue;
+      final startIndex = (row['start_stop_index'] as num?)?.toInt() ?? 0;
+      final endIndex =
+          (row['end_stop_index'] as num?)?.toInt() ?? route.length - 1;
+      if (stopIndex < startIndex || stopIndex > endIndex) continue;
+
+      final rawTime = row['_source'] == 'scheduled_departures'
+          ? row['departure_time']
+          : row['start_time'];
+      final departureTime = DateTime.tryParse('$rawTime')?.toLocal();
+      if (departureTime == null) continue;
+      departures.add(
+        DepartureInfo(
+          line: line,
+          departureTime: departureTime,
+          destination: route[endIndex.clamp(0, route.length - 1)].name,
+          status: '${row['status'] ?? 'scheduled'}',
+        ),
+      );
+    }
+    departures.sort((a, b) => a.departureTime.compareTo(b.departureTime));
+    return departures;
   }
 
   String _departureLabel(DepartureInfo departure) {
@@ -1230,12 +1361,28 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                   'Nejbližší zastávka',
                   style: TextStyle(color: Colors.white60),
                 ),
-                Text(
-                  _nearestStop!.name,
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _nearestStop!.name,
+                        style: const TextStyle(
+                          fontSize: 28,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Oblíbená zastávka',
+                      onPressed: _toggleFavorite,
+                      icon: Icon(
+                        _favoriteStopIds.contains(_nearestStop!.id)
+                            ? Icons.favorite
+                            : Icons.favorite_border,
+                        color: Colors.redAccent,
+                      ),
+                    ),
+                  ],
                 ),
                 Text('${math.max(0, _distanceMetres!.round())} m od vás'),
                 const SizedBox(height: 20),
@@ -1243,6 +1390,22 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                   'Odjezdy z této zastávky',
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
                 ),
+                if (_favoriteStopIds.contains(_nearestStop!.id) &&
+                    _departures.any(
+                      (departure) =>
+                          departure.departureTime
+                              .difference(DateTime.now())
+                              .inMinutes <=
+                          10,
+                    ))
+                  const Card(
+                    color: Color(0xFF174A2C),
+                    child: ListTile(
+                      leading: Icon(Icons.notifications_active),
+                      title: Text('Blíží se odjezd z oblíbené zastávky'),
+                      subtitle: Text('Nejbližší spoj odjíždí do 10 minut.'),
+                    ),
+                  ),
                 if (_departuresError != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 10),
@@ -1268,7 +1431,13 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                         child: Text(departure.line.number),
                       ),
                       title: Text(departure.destination),
-                      subtitle: const Text('Data z databáze'),
+                      subtitle: Text(
+                        activeTrip.running &&
+                                activeTrip.line.id == departure.line.id &&
+                                activeTrip.delayMinutes != 0
+                            ? 'Zpoždění ${activeTrip.delayMinutes} min'
+                            : 'Data z databáze',
+                      ),
                       trailing: Text(
                         _departureLabel(departure),
                         style: const TextStyle(
@@ -1296,9 +1465,7 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
               ],
               const SizedBox(height: 12),
               FilledButton.icon(
-                onPressed: activeTrip.running
-                    ? () => Navigator.pushNamed(context, '/onboard')
-                    : null,
+                onPressed: activeTrip.running ? _boardCurrentTrip : null,
                 icon: const Icon(Icons.login),
                 label: Text('NASTOUPIT DO LINKY ${activeTrip.line.number}'),
                 style: FilledButton.styleFrom(
@@ -1314,6 +1481,23 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                     style: TextStyle(color: Colors.white60),
                   ),
                 ),
+              if (_history.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                ExpansionTile(
+                  leading: const Icon(Icons.history),
+                  title: const Text('Historie cest'),
+                  children: _history
+                      .map(
+                        (trip) => ListTile(
+                          title: Text('Linka ${trip['line_number']}'),
+                          subtitle: Text(
+                            '${trip['origin_name']} → ${trip['destination_name']}',
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
             ],
           );
         },
@@ -1360,7 +1544,7 @@ class OnboardScreen extends StatelessWidget {
                       const SizedBox(width: 16),
                       Expanded(
                         child: Text(
-                          trip.line.destination,
+                          trip.routeStops[trip.endStopIndex].name,
                           style: const TextStyle(
                             fontSize: 28,
                             fontWeight: FontWeight.w800,
@@ -1370,6 +1554,14 @@ class OnboardScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 28),
+                  if (trip.alertText?.isNotEmpty == true)
+                    Card(
+                      color: Colors.red.shade900,
+                      child: ListTile(
+                        leading: const Icon(Icons.warning_amber),
+                        title: Text(trip.alertText!),
+                      ),
+                    ),
                   _StopCard(
                     label: 'AKTUÁLNÍ ZASTÁVKA',
                     stop: trip.current.name,
@@ -1382,8 +1574,28 @@ class OnboardScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 24),
                   LinearProgressIndicator(
-                    value: trip.stopIndex / (trip.line.stops.length - 1),
+                    value: (trip.stopIndex - trip.startStopIndex) /
+                        math.max(1, trip.endStopIndex - trip.startStopIndex),
                     minHeight: 10,
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(
+                      'Zpoždění: ${trip.delayMinutes} min • Obsazenost: ${_occupancyLabel(trip.occupancy)}',
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: trip.next != null && !trip.stopRequested
+                        ? () => serverSync.requestStop(true)
+                        : null,
+                    icon: const Icon(Icons.touch_app),
+                    label: Text(
+                      trip.stopRequested
+                          ? 'ZASTÁVKA NA ZNAMENÍ POŽADOVÁNA'
+                          : 'ZASTÁVKA NA ZNAMENÍ',
+                    ),
                   ),
                   if (trip.driver != null)
                     Padding(
@@ -1397,16 +1609,19 @@ class OnboardScreen extends StatelessWidget {
                   const SizedBox(height: 20),
                   Expanded(
                     child: ListView.builder(
-                      itemCount: trip.line.stops.length,
-                      itemBuilder: (_, index) => ListTile(
-                        leading: Icon(
-                          index == trip.stopIndex
-                              ? Icons.radio_button_checked
-                              : Icons.circle_outlined,
-                        ),
-                        title: Text(trip.line.stops[index].name),
-                        enabled: index >= trip.stopIndex,
-                      ),
+                      itemCount: trip.endStopIndex - trip.startStopIndex + 1,
+                      itemBuilder: (_, offset) {
+                        final index = trip.startStopIndex + offset;
+                        return ListTile(
+                          leading: Icon(
+                            index == trip.stopIndex
+                                ? Icons.radio_button_checked
+                                : Icons.circle_outlined,
+                          ),
+                          title: Text(trip.routeStops[index].name),
+                          enabled: index >= trip.stopIndex,
+                        );
+                      },
                     ),
                   ),
                 ],
@@ -1416,6 +1631,17 @@ class OnboardScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+String _occupancyLabel(String value) {
+  switch (value) {
+    case 'medium':
+      return 'střední';
+    case 'full':
+      return 'plno';
+    default:
+      return 'volno';
   }
 }
 
@@ -1504,15 +1730,102 @@ class _DriverScreenState extends State<DriverScreen> {
   int _startStopIndex = 0;
   int _endStopIndex = 0;
   bool _running = false;
+  String _direction = 'forward';
+  int _delayMinutes = 0;
+  String _occupancy = 'low';
+  String? _alertText;
+  DateTime? _tripStartedAt;
+  StreamSubscription<Position>? _positionSubscription;
+  int? _lastAutomaticArrival;
+  int? _lastNextAnnouncement;
+  List<Map<String, Object?>> _history = const [];
 
-  Stop get _current => _line!.stops[_stopIndex];
+  List<Stop> get _route =>
+      _direction == 'reverse' && _line?.reverseStops.isNotEmpty == true
+          ? _line!.reverseStops
+          : _line!.stops;
+  Stop get _current => _route[_stopIndex];
   Stop? get _next =>
-      _stopIndex + 1 <= _endStopIndex ? _line!.stops[_stopIndex + 1] : null;
+      _stopIndex + 1 <= _endStopIndex ? _route[_stopIndex + 1] : null;
 
   @override
   void initState() {
     super.initState();
     _configureAnnouncements();
+    _loadDriverHistory();
+  }
+
+  Future<void> _loadDriverHistory() async {
+    final history = await appDatabase.loadTripHistory('driver');
+    if (mounted) setState(() => _history = history);
+  }
+
+  Future<void> _startGpsAutomation() async {
+    if (!await Geolocator.isLocationServiceEnabled()) return;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return;
+    }
+    await _positionSubscription?.cancel();
+    _positionSubscription = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 15,
+      ),
+    ).listen(_handlePosition);
+  }
+
+  Future<void> _handlePosition(Position position) async {
+    if (!_running || _line == null) return;
+    final next = _next;
+    if (next?.latitude != null && next?.longitude != null) {
+      final nextDistance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        next!.latitude!,
+        next.longitude!,
+      );
+      final nextIndex = _stopIndex + 1;
+      if (nextDistance <= 65 && _lastAutomaticArrival != nextIndex) {
+        _lastAutomaticArrival = nextIndex;
+        if (!mounted) return;
+        setState(() => _stopIndex = nextIndex);
+        activeTrip.update(
+          _line!,
+          _stopIndex,
+          true,
+          startStopIndex: _startStopIndex,
+          endStopIndex: _endStopIndex,
+          direction: _direction,
+          delayMinutes: _delayMinutes,
+          occupancy: _occupancy,
+          stopRequested: false,
+          alertText: _alertText,
+        );
+        await _announceArrival();
+        return;
+      }
+    }
+
+    final current = _current;
+    if (current.latitude != null &&
+        current.longitude != null &&
+        _next != null) {
+      final currentDistance = Geolocator.distanceBetween(
+        position.latitude,
+        position.longitude,
+        current.latitude!,
+        current.longitude!,
+      );
+      if (currentDistance >= 100 && _lastNextAnnouncement != _stopIndex + 1) {
+        _lastNextAnnouncement = _stopIndex + 1;
+        await _speak('Příští zastávka ${_next!.name}.');
+      }
+    }
   }
 
   Future<void> _configureAnnouncements() async {
@@ -1595,7 +1908,7 @@ class _DriverScreenState extends State<DriverScreen> {
     }
     final isSelectedTerminal = _stopIndex == _endStopIndex;
     final isShortenedTrip =
-        isSelectedTerminal && _endStopIndex < _line!.stops.length - 1;
+        isSelectedTerminal && _endStopIndex < _route.length - 1;
     if (isShortenedTrip) {
       await _speak(
         '${_current.name}. Upozorňujeme cestující, že tento spoj končí jízdu v zastávce ${_current.name}.',
@@ -1611,6 +1924,7 @@ class _DriverScreenState extends State<DriverScreen> {
 
   @override
   void dispose() {
+    _positionSubscription?.cancel();
     _gongPlayer.dispose();
     _tts.stop();
     super.dispose();
@@ -1619,13 +1933,32 @@ class _DriverScreenState extends State<DriverScreen> {
   Future<void> _depart() async {
     if (_next == null) {
       setState(() => _running = false);
+      _positionSubscription?.cancel();
       activeTrip.update(
         _line!,
         _stopIndex,
         false,
         startStopIndex: _startStopIndex,
         endStopIndex: _endStopIndex,
+        direction: _direction,
+        delayMinutes: _delayMinutes,
+        occupancy: _occupancy,
+        stopRequested: false,
+        alertText: _alertText,
       );
+      if (_tripStartedAt != null) {
+        await appDatabase.addTripHistory(
+          role: 'driver',
+          lineNumber: _line!.number,
+          originName: _route[_startStopIndex].name,
+          destinationName: _route[_endStopIndex].name,
+          startedAt: _tripStartedAt!,
+          endedAt: DateTime.now(),
+          delayMinutes: _delayMinutes,
+          direction: _direction,
+        );
+        await _loadDriverHistory();
+      }
       return;
     }
     final nextName = _next!.name;
@@ -1639,6 +1972,11 @@ class _DriverScreenState extends State<DriverScreen> {
       _running,
       startStopIndex: _startStopIndex,
       endStopIndex: _endStopIndex,
+      direction: _direction,
+      delayMinutes: _delayMinutes,
+      occupancy: _occupancy,
+      stopRequested: false,
+      alertText: _alertText,
     );
     await _speak('Příští zastávka $nextName.');
   }
@@ -1647,9 +1985,10 @@ class _DriverScreenState extends State<DriverScreen> {
     if (line == null) return;
     setState(() {
       _line = line;
+      _direction = 'forward';
       _stopIndex = 0;
       _startStopIndex = 0;
-      _endStopIndex = line.stops.length - 1;
+      _endStopIndex = _route.length - 1;
       _running = false;
     });
   }
@@ -1659,8 +1998,40 @@ class _DriverScreenState extends State<DriverScreen> {
     setState(() {
       _startStopIndex = index;
       _stopIndex = index;
-      if (_endStopIndex < index) _endStopIndex = _line!.stops.length - 1;
+      if (_endStopIndex < index) _endStopIndex = _route.length - 1;
     });
+  }
+
+  void _selectDirection(String? value) {
+    if (value == null || _running) return;
+    setState(() {
+      _direction = value;
+      _startStopIndex = 0;
+      _stopIndex = 0;
+      _endStopIndex = _route.length - 1;
+    });
+  }
+
+  void _syncOperationalState() {
+    if (!_running || _line == null) return;
+    activeTrip.update(
+      _line!,
+      _stopIndex,
+      true,
+      startStopIndex: _startStopIndex,
+      endStopIndex: _endStopIndex,
+      direction: _direction,
+      delayMinutes: _delayMinutes,
+      occupancy: _occupancy,
+      stopRequested: activeTrip.stopRequested,
+      alertText: _alertText,
+    );
+  }
+
+  Future<void> _announceServiceAlert(String? text) async {
+    setState(() => _alertText = text);
+    _syncOperationalState();
+    if (text != null) await _speak(text);
   }
 
   void _startTrip() {
@@ -1669,6 +2040,7 @@ class _DriverScreenState extends State<DriverScreen> {
     setState(() {
       _stopIndex = _startStopIndex;
       _running = true;
+      _tripStartedAt = DateTime.now();
     });
     activeTrip.update(
       line,
@@ -1676,7 +2048,13 @@ class _DriverScreenState extends State<DriverScreen> {
       true,
       startStopIndex: _startStopIndex,
       endStopIndex: _endStopIndex,
+      direction: _direction,
+      delayMinutes: _delayMinutes,
+      occupancy: _occupancy,
+      stopRequested: false,
+      alertText: _alertText,
     );
+    _startGpsAutomation();
   }
 
   @override
@@ -1744,6 +2122,19 @@ class _DriverScreenState extends State<DriverScreen> {
               )
             else ...[
               const SizedBox(height: 18),
+              DropdownButtonFormField<String>(
+                initialValue: _direction,
+                decoration: const InputDecoration(
+                  labelText: 'Směr linky',
+                  border: OutlineInputBorder(),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'forward', child: Text('Tam')),
+                  DropdownMenuItem(value: 'reverse', child: Text('Zpět')),
+                ],
+                onChanged: _running ? null : _selectDirection,
+              ),
+              const SizedBox(height: 14),
               Row(
                 children: [
                   Expanded(
@@ -1754,10 +2145,10 @@ class _DriverScreenState extends State<DriverScreen> {
                         border: OutlineInputBorder(),
                       ),
                       items: List.generate(
-                        _line!.stops.length,
+                        _route.length,
                         (index) => DropdownMenuItem(
                           value: index,
-                          child: Text(_line!.stops[index].name),
+                          child: Text(_route[index].name),
                         ),
                       ),
                       onChanged: _running ? null : _selectStart,
@@ -1774,11 +2165,11 @@ class _DriverScreenState extends State<DriverScreen> {
                       ),
                       items: [
                         for (var index = _startStopIndex;
-                            index < _line!.stops.length;
+                            index < _route.length;
                             index++)
                           DropdownMenuItem(
                             value: index,
-                            child: Text(_line!.stops[index].name),
+                            child: Text(_route[index].name),
                           ),
                       ],
                       onChanged: _running
@@ -1800,6 +2191,19 @@ class _DriverScreenState extends State<DriverScreen> {
                   ),
                 ),
               if (_running) ...[
+                AnimatedBuilder(
+                  animation: activeTrip,
+                  builder: (context, _) => activeTrip.stopRequested
+                      ? Card(
+                          color: Colors.orange.shade900,
+                          child: const ListTile(
+                            leading: Icon(Icons.notifications_active),
+                            title: Text('ZASTÁVKA NA ZNAMENÍ'),
+                            subtitle: Text('Cestující požádal o zastavení.'),
+                          ),
+                        )
+                      : const SizedBox.shrink(),
+                ),
                 const SizedBox(height: 18),
                 _StopCard(label: 'AKTUÁLNÍ ZASTÁVKA', stop: _current.name),
                 const SizedBox(height: 12),
@@ -1852,10 +2256,86 @@ class _DriverScreenState extends State<DriverScreen> {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: () {
+                        setState(() => _delayMinutes--);
+                        _syncOperationalState();
+                      },
+                      icon: const Icon(Icons.remove_circle_outline),
+                    ),
+                    Expanded(
+                      child: Text(
+                        'Zpoždění $_delayMinutes min',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () {
+                        setState(() => _delayMinutes++);
+                        _syncOperationalState();
+                      },
+                      icon: const Icon(Icons.add_circle_outline),
+                    ),
+                  ],
+                ),
+                DropdownButtonFormField<String>(
+                  initialValue: _occupancy,
+                  decoration: const InputDecoration(
+                    labelText: 'Obsazenost pro cestující',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'low', child: Text('Volno')),
+                    DropdownMenuItem(
+                      value: 'medium',
+                      child: Text('Středně obsazeno'),
+                    ),
+                    DropdownMenuItem(value: 'full', child: Text('Plno')),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setState(() => _occupancy = value);
+                    _syncOperationalState();
+                  },
+                ),
+                const SizedBox(height: 14),
+                ExpansionTile(
+                  leading: const Icon(Icons.campaign),
+                  title: const Text('Mimořádná hlášení'),
+                  children: [
+                    ListTile(
+                      title: const Text('Výluka nebo změna trasy'),
+                      onTap: () => _announceServiceAlert(
+                        'Upozorňujeme cestující na mimořádnou změnu trasy. Sledujte prosím pokyny řidiče.',
+                      ),
+                    ),
+                    ListTile(
+                      title: const Text('Technická porucha'),
+                      onTap: () => _announceServiceAlert(
+                        'Upozorňujeme cestující, že z důvodu technické poruchy může dojít ke zdržení spoje.',
+                      ),
+                    ),
+                    ListTile(
+                      title: const Text('Uvolněte dveře'),
+                      onTap: () => _announceServiceAlert(
+                        'Prosíme cestující, aby uvolnili prostor dveří.',
+                      ),
+                    ),
+                    if (_alertText != null)
+                      ListTile(
+                        title: const Text('Ukončit mimořádné hlášení'),
+                        onTap: () => _announceServiceAlert(null),
+                      ),
+                  ],
+                ),
               ],
               const SizedBox(height: 18),
-              ...List.generate(_line!.stops.length, (index) {
-                final stop = _line!.stops[index];
+              ...List.generate(_route.length, (index) {
+                final stop = _route[index];
                 final outside =
                     index < _startStopIndex || index > _endStopIndex;
                 final passed = _running && index < _stopIndex;
@@ -1872,6 +2352,21 @@ class _DriverScreenState extends State<DriverScreen> {
                   textColor: outside || passed ? Colors.white38 : Colors.white,
                 );
               }),
+              if (_history.isNotEmpty)
+                ExpansionTile(
+                  leading: const Icon(Icons.history),
+                  title: const Text('Historie jízd řidiče'),
+                  children: _history
+                      .map(
+                        (trip) => ListTile(
+                          title: Text('Linka ${trip['line_number']}'),
+                          subtitle: Text(
+                            '${trip['origin_name']} → ${trip['destination_name']}',
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
             ],
           ],
         ),

@@ -16,7 +16,7 @@ class AppDatabase {
     final root = await getDatabasesPath();
     _database = await openDatabase(
       path.join(root, 'mhd_mikylov.db'),
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE settings (
@@ -80,9 +80,29 @@ class AppDatabase {
             updated_at TEXT NOT NULL
           )
         ''');
+        await _createHistoryTables(db);
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) await _createHistoryTables(db);
       },
     );
     return _database!;
+  }
+
+  static Future<void> _createHistoryTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS trip_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        line_number TEXT NOT NULL,
+        origin_name TEXT NOT NULL,
+        destination_name TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        delay_minutes INTEGER NOT NULL DEFAULT 0,
+        direction TEXT NOT NULL DEFAULT 'forward'
+      )
+    ''');
   }
 
   Future<void> saveActiveTrip({
@@ -124,6 +144,61 @@ class AppDatabase {
     final rows = await db.query('settings', where: 'key = ?', whereArgs: [key]);
     if (rows.isEmpty) return null;
     return jsonDecode(rows.first['value']! as String) as T?;
+  }
+
+  Future<void> saveCache(String key, Object? value) async {
+    final db = await database;
+    await db.insert(
+      'cached_data',
+      {
+        'key': key,
+        'json_value': jsonEncode(value),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<T?> loadCache<T>(String key) async {
+    final db = await database;
+    final rows =
+        await db.query('cached_data', where: 'key = ?', whereArgs: [key]);
+    if (rows.isEmpty) return null;
+    return jsonDecode(rows.first['json_value']! as String) as T?;
+  }
+
+  Future<void> addTripHistory({
+    required String role,
+    required String lineNumber,
+    required String originName,
+    required String destinationName,
+    required DateTime startedAt,
+    DateTime? endedAt,
+    required int delayMinutes,
+    required String direction,
+  }) async {
+    final db = await database;
+    await db.insert('trip_history', {
+      'role': role,
+      'line_number': lineNumber,
+      'origin_name': originName,
+      'destination_name': destinationName,
+      'started_at': startedAt.toIso8601String(),
+      'ended_at': endedAt?.toIso8601String(),
+      'delay_minutes': delayMinutes,
+      'direction': direction,
+    });
+  }
+
+  Future<List<Map<String, Object?>>> loadTripHistory(String role) async {
+    final db = await database;
+    return db.query(
+      'trip_history',
+      where: 'role = ?',
+      whereArgs: [role],
+      orderBy: 'started_at DESC',
+      limit: 100,
+    );
   }
 
   Future<void> saveGtfsImport({

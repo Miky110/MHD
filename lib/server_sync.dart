@@ -8,6 +8,11 @@ typedef RemoteTripHandler = void Function({
   required int startStopIndex,
   required int endStopIndex,
   required bool running,
+  required String direction,
+  required int delayMinutes,
+  required String occupancy,
+  required bool stopRequested,
+  String? alertText,
   String? driverId,
 });
 
@@ -41,6 +46,11 @@ class ServerSyncService {
     required int startStopIndex,
     required int endStopIndex,
     required bool running,
+    required String direction,
+    required int delayMinutes,
+    required String occupancy,
+    required bool stopRequested,
+    String? alertText,
     String? driverId,
   }) async {
     if (!_initialized) return;
@@ -51,9 +61,22 @@ class ServerSyncService {
       'start_stop_index': startStopIndex,
       'end_stop_index': endStopIndex,
       'running': running,
+      'direction': direction,
+      'delay_minutes': delayMinutes,
+      'occupancy': occupancy,
+      'stop_requested': stopRequested,
+      'alert_text': alertText,
       'driver_id': driverId,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     });
+  }
+
+  Future<void> requestStop(bool requested) async {
+    if (!_initialized) return;
+    await _client.from('active_trips').update({
+      'stop_requested': requested,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }).eq('id', 'main');
   }
 
   Future<List<Map<String, dynamic>>> fetchStops() async {
@@ -153,10 +176,7 @@ class ServerSyncService {
     await _client.from('prague_stops').delete().neq('id', '');
     await _client.from('prague_lines').delete().neq('id', '');
     for (var index = 0; index < stops.length; index += 500) {
-      final chunk = stops
-          .skip(index)
-          .take(500)
-          .map(
+      final chunk = stops.skip(index).take(500).map(
             (row) => {
               'id': row['stop_id'],
               'name': row['stop_name'],
@@ -172,10 +192,7 @@ class ServerSyncService {
       await _client.from('prague_stops').upsert(chunk.toList());
     }
     for (var index = 0; index < routes.length; index += 500) {
-      final chunk = routes
-          .skip(index)
-          .take(500)
-          .map(
+      final chunk = routes.skip(index).take(500).map(
             (row) => {
               'id': row['route_id'],
               'short_name': row['route_short_name'],
@@ -205,6 +222,11 @@ class ServerSyncService {
             startStopIndex: row['start_stop_index'] as int? ?? 0,
             endStopIndex: row['end_stop_index'] as int? ?? 0,
             running: row['running'] as bool,
+            direction: row['direction'] as String? ?? 'forward',
+            delayMinutes: row['delay_minutes'] as int? ?? 0,
+            occupancy: row['occupancy'] as String? ?? 'low',
+            stopRequested: row['stop_requested'] as bool? ?? false,
+            alertText: row['alert_text'] as String?,
             driverId: row['driver_id'] as String?,
           );
         });
