@@ -23,8 +23,15 @@ final transitData = TransitDataController();
 final activeTrip = ActiveTripController();
 
 class Stop {
-  const Stop(this.name, this.minutes,
-      [this.latitude, this.longitude, this.id, this.zone, this.type]);
+  const Stop(
+    this.name,
+    this.minutes, [
+    this.latitude,
+    this.longitude,
+    this.id,
+    this.zone,
+    this.type,
+  ]);
   final String name;
   final int minutes;
   final double? latitude;
@@ -35,8 +42,15 @@ class Stop {
 }
 
 class TransitLine {
-  const TransitLine(this.number, this.destination, this.color, this.stops,
-      [this.id, this.type, this.carrier]);
+  const TransitLine(
+    this.number,
+    this.destination,
+    this.color,
+    this.stops, [
+    this.id,
+    this.type,
+    this.carrier,
+  ]);
   final String number;
   final String destination;
   final Color color;
@@ -47,12 +61,30 @@ class TransitLine {
 }
 
 class DriverInfo {
-  const DriverInfo(
-      {required this.id, required this.name, required this.pin, this.phone});
+  const DriverInfo({
+    required this.id,
+    required this.name,
+    required this.pin,
+    this.phone,
+  });
   final String id;
   final String name;
   final String pin;
   final String? phone;
+}
+
+class DepartureInfo {
+  const DepartureInfo({
+    required this.line,
+    required this.departureTime,
+    required this.destination,
+    required this.status,
+  });
+
+  final TransitLine line;
+  final DateTime departureTime;
+  final String destination;
+  final String status;
 }
 
 const demoLines = <TransitLine>[
@@ -118,25 +150,29 @@ class TransitDataController extends ChangeNotifier {
           .whereType<Stop>()
           .toList(growable: false);
       if (routeStops.isEmpty) continue;
-      loadedLines.add(TransitLine(
-        row['name'] as String? ?? '?',
-        routeStops.last.name,
-        _parseColor(row['color'] as String?),
-        routeStops,
-        '${row['id']}',
-        row['type'] as String?,
-        row['carrier'] as String?,
-      ));
+      loadedLines.add(
+        TransitLine(
+          row['name'] as String? ?? '?',
+          routeStops.last.name,
+          _parseColor(row['color'] as String?),
+          routeStops,
+          '${row['id']}',
+          row['type'] as String?,
+          row['carrier'] as String?,
+        ),
+      );
     }
     stops = byId.values.toList(growable: false);
     if (loadedLines.isNotEmpty) lines = loadedLines;
     drivers = driverRows
-        .map((row) => DriverInfo(
-              id: '${row['id']}',
-              name: row['name'] as String? ?? 'Neznámý řidič',
-              pin: '${row['pin'] ?? ''}',
-              phone: row['phone'] as String?,
-            ))
+        .map(
+          (row) => DriverInfo(
+            id: '${row['id']}',
+            name: row['name'] as String? ?? 'Neznámý řidič',
+            pin: '${row['pin'] ?? ''}',
+            phone: row['phone'] as String?,
+          ),
+        )
         .toList(growable: false);
     loadedFromServer = true;
     notifyListeners();
@@ -154,13 +190,17 @@ class TransitDataController extends ChangeNotifier {
 class ActiveTripController extends ChangeNotifier {
   TransitLine line = lines.first;
   int stopIndex = 0;
+  int startStopIndex = 0;
+  int endStopIndex = lines.first.stops.length - 1;
   bool running = false;
   bool _applyingRemoteState = false;
   DriverInfo? driver;
 
   Stop get current => line.stops[stopIndex];
   Stop? get next =>
-      stopIndex + 1 < line.stops.length ? line.stops[stopIndex + 1] : null;
+      stopIndex + 1 <= endStopIndex && stopIndex + 1 < line.stops.length
+          ? line.stops[stopIndex + 1]
+          : null;
 
   Future<void> restore() async {
     final saved = await appDatabase.loadActiveTrip();
@@ -172,6 +212,8 @@ class ActiveTripController extends ChangeNotifier {
     );
     final savedIndex = saved['stop_index'] as int? ?? 0;
     stopIndex = savedIndex.clamp(0, line.stops.length - 1);
+    startStopIndex = 0;
+    endStopIndex = line.stops.length - 1;
     running = saved['running'] == 1;
   }
 
@@ -179,6 +221,8 @@ class ActiveTripController extends ChangeNotifier {
     serverSync.watchTrip(({
       required lineNumber,
       required stopIndex,
+      required startStopIndex,
+      required endStopIndex,
       required running,
       String? driverId,
     }) {
@@ -189,6 +233,10 @@ class ActiveTripController extends ChangeNotifier {
       _applyingRemoteState = true;
       line = remoteLine;
       this.stopIndex = stopIndex.clamp(0, line.stops.length - 1);
+      this.startStopIndex = startStopIndex.clamp(0, line.stops.length - 1);
+      this.endStopIndex = endStopIndex <= 0
+          ? line.stops.length - 1
+          : endStopIndex.clamp(this.startStopIndex, line.stops.length - 1);
       this.running = running;
       driver = null;
       for (final item in transitData.drivers) {
@@ -204,9 +252,17 @@ class ActiveTripController extends ChangeNotifier {
     });
   }
 
-  void update(TransitLine newLine, int newStopIndex, bool isRunning) {
+  void update(
+    TransitLine newLine,
+    int newStopIndex,
+    bool isRunning, {
+    int? startStopIndex,
+    int? endStopIndex,
+  }) {
     line = newLine;
     stopIndex = newStopIndex;
+    this.startStopIndex = startStopIndex ?? this.startStopIndex;
+    this.endStopIndex = endStopIndex ?? this.endStopIndex;
     running = isRunning;
     notifyListeners();
     appDatabase.saveActiveTrip(
@@ -218,6 +274,8 @@ class ActiveTripController extends ChangeNotifier {
       serverSync.publishTrip(
         lineNumber: line.number,
         stopIndex: stopIndex,
+        startStopIndex: this.startStopIndex,
+        endStopIndex: this.endStopIndex,
         running: running,
         driverId: driver?.id,
       );
@@ -227,12 +285,6 @@ class ActiveTripController extends ChangeNotifier {
   void selectDriver(DriverInfo selectedDriver) {
     driver = selectedDriver;
     notifyListeners();
-    serverSync.publishTrip(
-      lineNumber: line.number,
-      stopIndex: stopIndex,
-      running: running,
-      driverId: driver?.id,
-    );
   }
 }
 
@@ -323,10 +375,8 @@ class ModeSelectionScreen extends StatelessWidget {
           obscureText: true,
           autofocus: true,
           decoration: const InputDecoration(labelText: 'Heslo'),
-          onSubmitted: (_) => Navigator.pop(
-            dialogContext,
-            password.text == 'Mikolasek080523',
-          ),
+          onSubmitted: (_) =>
+              Navigator.pop(dialogContext, password.text == 'Mikolasek080523'),
         ),
         actions: [
           TextButton(
@@ -413,10 +463,12 @@ class _AdminScreenState extends State<AdminScreen> {
 
   Future<void> _editStop([Stop? stop]) async {
     final name = TextEditingController(text: stop?.name ?? '');
-    final latitude =
-        TextEditingController(text: stop?.latitude?.toString() ?? '');
-    final longitude =
-        TextEditingController(text: stop?.longitude?.toString() ?? '');
+    final latitude = TextEditingController(
+      text: stop?.latitude?.toString() ?? '',
+    );
+    final longitude = TextEditingController(
+      text: stop?.longitude?.toString() ?? '',
+    );
     final zone = TextEditingController(text: stop?.zone ?? 'P');
     final type = TextEditingController(text: stop?.type ?? 'bus');
     final save = await showDialog<bool>(
@@ -424,34 +476,45 @@ class _AdminScreenState extends State<AdminScreen> {
       builder: (dialogContext) => AlertDialog(
         title: Text(stop == null ? 'Přidat zastávku' : 'Upravit zastávku'),
         content: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
                 controller: name,
-                decoration: const InputDecoration(labelText: 'Název')),
-            TextField(
+                decoration: const InputDecoration(labelText: 'Název'),
+              ),
+              TextField(
                 controller: latitude,
                 decoration: const InputDecoration(labelText: 'Zeměpisná šířka'),
-                keyboardType: TextInputType.number),
-            TextField(
+                keyboardType: TextInputType.number,
+              ),
+              TextField(
                 controller: longitude,
                 decoration: const InputDecoration(labelText: 'Zeměpisná délka'),
-                keyboardType: TextInputType.number),
-            TextField(
+                keyboardType: TextInputType.number,
+              ),
+              TextField(
                 controller: zone,
-                decoration: const InputDecoration(labelText: 'Pásmo')),
-            TextField(
+                decoration: const InputDecoration(labelText: 'Pásmo'),
+              ),
+              TextField(
                 controller: type,
                 decoration: const InputDecoration(
-                    labelText: 'Typ (bus, tram, metro...)')),
-          ]),
+                  labelText: 'Typ (bus, tram, metro...)',
+                ),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Zrušit')),
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Zrušit'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Uložit')),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Uložit'),
+          ),
         ],
       ),
     );
@@ -491,11 +554,13 @@ class _AdminScreenState extends State<AdminScreen> {
 
   Future<void> _editLine([TransitLine? line]) async {
     final number = TextEditingController(text: line?.number ?? '');
-    final carrier =
-        TextEditingController(text: line?.carrier ?? 'Dopravní podnik Mikylov');
+    final carrier = TextEditingController(
+      text: line?.carrier ?? 'Dopravní podnik Mikylov',
+    );
     final color = TextEditingController(
-        text:
-            '#${line?.color.toARGB32().toRadixString(16).substring(2) ?? '1565c0'}');
+      text:
+          '#${line?.color.toARGB32().toRadixString(16).substring(2) ?? '1565c0'}',
+    );
     String? firstStopId = line != null && line.stops.isNotEmpty
         ? line.stops.first.id
         : (transitData.stops.isEmpty ? null : transitData.stops.first.id);
@@ -508,47 +573,67 @@ class _AdminScreenState extends State<AdminScreen> {
         builder: (context, setDialogState) => AlertDialog(
           title: Text(line == null ? 'Přidat linku' : 'Upravit linku'),
           content: SingleChildScrollView(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              TextField(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
                   controller: number,
                   decoration: const InputDecoration(
-                      labelText: 'Číslo / označení linky')),
-              TextField(
+                    labelText: 'Číslo / označení linky',
+                  ),
+                ),
+                TextField(
                   controller: carrier,
-                  decoration: const InputDecoration(labelText: 'Dopravce')),
-              TextField(
+                  decoration: const InputDecoration(labelText: 'Dopravce'),
+                ),
+                TextField(
                   controller: color,
-                  decoration:
-                      const InputDecoration(labelText: 'Barva #RRGGBB')),
-              DropdownButtonFormField<String>(
-                initialValue: firstStopId,
-                decoration:
-                    const InputDecoration(labelText: 'Výchozí zastávka'),
-                items: transitData.stops
-                    .map((item) => DropdownMenuItem(
-                        value: item.id, child: Text(item.name)))
-                    .toList(),
-                onChanged: (value) => setDialogState(() => firstStopId = value),
-              ),
-              DropdownButtonFormField<String>(
-                initialValue: lastStopId,
-                decoration:
-                    const InputDecoration(labelText: 'Konečná zastávka'),
-                items: transitData.stops
-                    .map((item) => DropdownMenuItem(
-                        value: item.id, child: Text(item.name)))
-                    .toList(),
-                onChanged: (value) => setDialogState(() => lastStopId = value),
-              ),
-            ]),
+                  decoration: const InputDecoration(labelText: 'Barva #RRGGBB'),
+                ),
+                DropdownButtonFormField<String>(
+                  initialValue: firstStopId,
+                  decoration: const InputDecoration(
+                    labelText: 'Výchozí zastávka',
+                  ),
+                  items: transitData.stops
+                      .map(
+                        (item) => DropdownMenuItem(
+                          value: item.id,
+                          child: Text(item.name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) =>
+                      setDialogState(() => firstStopId = value),
+                ),
+                DropdownButtonFormField<String>(
+                  initialValue: lastStopId,
+                  decoration: const InputDecoration(
+                    labelText: 'Konečná zastávka',
+                  ),
+                  items: transitData.stops
+                      .map(
+                        (item) => DropdownMenuItem(
+                          value: item.id,
+                          child: Text(item.name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) =>
+                      setDialogState(() => lastStopId = value),
+                ),
+              ],
+            ),
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(dialogContext, false),
-                child: const Text('Zrušit')),
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Zrušit'),
+            ),
             FilledButton(
-                onPressed: () => Navigator.pop(dialogContext, true),
-                child: const Text('Uložit')),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Uložit'),
+            ),
           ],
         ),
       ),
@@ -599,27 +684,35 @@ class _AdminScreenState extends State<AdminScreen> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text(driver == null ? 'Přidat řidiče' : 'Upravit řidiče'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
               controller: name,
-              decoration: const InputDecoration(labelText: 'Jméno a příjmení')),
-          TextField(
+              decoration: const InputDecoration(labelText: 'Jméno a příjmení'),
+            ),
+            TextField(
               controller: phone,
               keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(labelText: 'Telefon')),
-          TextField(
+              decoration: const InputDecoration(labelText: 'Telefon'),
+            ),
+            TextField(
               controller: pin,
               obscureText: true,
               keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'PIN')),
-        ]),
+              decoration: const InputDecoration(labelText: 'PIN'),
+            ),
+          ],
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Zrušit')),
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Zrušit'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Uložit')),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Uložit'),
+          ),
         ],
       ),
     );
@@ -652,8 +745,9 @@ class _AdminScreenState extends State<AdminScreen> {
 
   Future<void> _editGong(TransitLine line) async {
     if (line.id == null) return;
-    final url =
-        TextEditingController(text: transitData.lineGongs[line.id] ?? '');
+    final url = TextEditingController(
+      text: transitData.lineGongs[line.id] ?? '',
+    );
     final save = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -664,11 +758,13 @@ class _AdminScreenState extends State<AdminScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Zrušit')),
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Zrušit'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Uložit')),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Uložit'),
+          ),
         ],
       ),
     );
@@ -721,108 +817,150 @@ class _AdminScreenState extends State<AdminScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Row(children: [
-            const Expanded(
-              child: Text('Linky v databázi',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
-            ),
-            IconButton(
-                onPressed: _refreshTransit, icon: const Icon(Icons.refresh)),
-            FilledButton.icon(
-              onPressed:
-                  transitData.stops.length >= 2 ? () => _editLine() : null,
-              icon: const Icon(Icons.add),
-              label: const Text('Linka'),
-            ),
-          ]),
-          const SizedBox(height: 8),
-          ...transitData.lines.map((line) => Card(
-                child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor: line.color,
-                    child: Text(line.number),
-                  ),
-                  title: Text('${line.number} → ${line.destination}'),
-                  subtitle: Text(
-                      '${line.stops.length} zastávek • ${line.carrier ?? 'bez dopravce'}'),
-                  trailing: Wrap(spacing: 2, children: [
-                    IconButton(
-                        onPressed: () => _editGong(line),
-                        icon: const Icon(Icons.audiotrack_outlined)),
-                    IconButton(
-                        onPressed: () => _editLine(line),
-                        icon: const Icon(Icons.edit_outlined)),
-                    IconButton(
-                        onPressed: () => _deleteLine(line),
-                        icon: const Icon(Icons.delete_outline),
-                        color: Colors.redAccent),
-                  ]),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Linky v databázi',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
                 ),
-              )),
-          const SizedBox(height: 22),
-          Row(children: [
-            const Expanded(
-              child: Text('Zastávky v databázi',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
-            ),
-            FilledButton.icon(
-              onPressed: () => _editStop(),
-              icon: const Icon(Icons.add_location_alt_outlined),
-              label: const Text('Zastávka'),
-            ),
-          ]),
+              ),
+              IconButton(
+                onPressed: _refreshTransit,
+                icon: const Icon(Icons.refresh),
+              ),
+              FilledButton.icon(
+                onPressed:
+                    transitData.stops.length >= 2 ? () => _editLine() : null,
+                icon: const Icon(Icons.add),
+                label: const Text('Linka'),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
-          ...transitData.stops.map((stop) => Card(
-                child: ListTile(
-                  leading: const Icon(Icons.location_on_outlined),
-                  title: Text(stop.name),
-                  subtitle: Text(
-                      '${stop.type ?? 'zastávka'} • pásmo ${stop.zone ?? '-'}'),
-                  trailing: Wrap(spacing: 2, children: [
-                    IconButton(
-                        onPressed: () => _editStop(stop),
-                        icon: const Icon(Icons.edit_outlined)),
-                    IconButton(
-                        onPressed: () => _deleteStop(stop),
-                        icon: const Icon(Icons.delete_outline),
-                        color: Colors.redAccent),
-                  ]),
+          ...transitData.lines.map(
+            (line) => Card(
+              child: ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: line.color,
+                  child: Text(line.number),
                 ),
-              )),
+                title: Text('${line.number} → ${line.destination}'),
+                subtitle: Text(
+                  '${line.stops.length} zastávek • ${line.carrier ?? 'bez dopravce'}',
+                ),
+                trailing: Wrap(
+                  spacing: 2,
+                  children: [
+                    IconButton(
+                      onPressed: () => _editGong(line),
+                      icon: const Icon(Icons.audiotrack_outlined),
+                    ),
+                    IconButton(
+                      onPressed: () => _editLine(line),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      onPressed: () => _deleteLine(line),
+                      icon: const Icon(Icons.delete_outline),
+                      color: Colors.redAccent,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
           const SizedBox(height: 22),
-          Row(children: [
-            const Expanded(
-              child: Text('Řidiči a PINy',
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
-            ),
-            FilledButton.icon(
-              onPressed: () => _editDriver(),
-              icon: const Icon(Icons.person_add_alt),
-              label: const Text('Řidič'),
-            ),
-          ]),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Zastávky v databázi',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: () => _editStop(),
+                icon: const Icon(Icons.add_location_alt_outlined),
+                label: const Text('Zastávka'),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
-          ...transitData.drivers.map((driver) => Card(
-                child: ListTile(
-                  leading: const Icon(Icons.badge_outlined),
-                  title: Text(driver.name),
-                  subtitle: Text(driver.phone?.isNotEmpty == true
+          ...transitData.stops.map(
+            (stop) => Card(
+              child: ListTile(
+                leading: const Icon(Icons.location_on_outlined),
+                title: Text(stop.name),
+                subtitle: Text(
+                  '${stop.type ?? 'zastávka'} • pásmo ${stop.zone ?? '-'}',
+                ),
+                trailing: Wrap(
+                  spacing: 2,
+                  children: [
+                    IconButton(
+                      onPressed: () => _editStop(stop),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      onPressed: () => _deleteStop(stop),
+                      icon: const Icon(Icons.delete_outline),
+                      color: Colors.redAccent,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 22),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Řidiči a PINy',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                ),
+              ),
+              FilledButton.icon(
+                onPressed: () => _editDriver(),
+                icon: const Icon(Icons.person_add_alt),
+                label: const Text('Řidič'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...transitData.drivers.map(
+            (driver) => Card(
+              child: ListTile(
+                leading: const Icon(Icons.badge_outlined),
+                title: Text(driver.name),
+                subtitle: Text(
+                  driver.phone?.isNotEmpty == true
                       ? '${driver.phone} • PIN nastaven'
-                      : 'Bez telefonu • PIN nastaven'),
-                  trailing: Wrap(spacing: 2, children: [
-                    IconButton(
-                        onPressed: () => _editDriver(driver),
-                        icon: const Icon(Icons.edit_outlined)),
-                    IconButton(
-                        onPressed: () => _deleteDriver(driver),
-                        icon: const Icon(Icons.delete_outline),
-                        color: Colors.redAccent),
-                  ]),
+                      : 'Bez telefonu • PIN nastaven',
                 ),
-              )),
+                trailing: Wrap(
+                  spacing: 2,
+                  children: [
+                    IconButton(
+                      onPressed: () => _editDriver(driver),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                    IconButton(
+                      onPressed: () => _deleteDriver(driver),
+                      icon: const Icon(Icons.delete_outline),
+                      color: Colors.redAccent,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
           const Divider(height: 42),
-          const Text('Import veřejných dopravních dat',
-              style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800)),
+          const Text(
+            'Import veřejných dopravních dat',
+            style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+          ),
           const SizedBox(height: 8),
           const Text(
             'GTFS se automaticky stáhne z oficiálního zdroje a načte linky, '
@@ -832,8 +970,10 @@ class _AdminScreenState extends State<AdminScreen> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 12),
-              child: Text(_error!,
-                  style: const TextStyle(color: Colors.redAccent)),
+              child: Text(
+                _error!,
+                style: const TextStyle(color: Colors.redAccent),
+              ),
             ),
           const SizedBox(height: 18),
           ...gtfsSources.map((source) {
@@ -845,11 +985,17 @@ class _AdminScreenState extends State<AdminScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(source.name,
-                        style: const TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.w700)),
-                    Text(source.city,
-                        style: const TextStyle(color: Colors.white60)),
+                    Text(
+                      source.name,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      source.city,
+                      style: const TextStyle(color: Colors.white60),
+                    ),
                     if (result != null) ...[
                       const SizedBox(height: 10),
                       Text(
@@ -867,9 +1013,11 @@ class _AdminScreenState extends State<AdminScreen> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.cloud_download_outlined),
-                      label: Text(result == null
-                          ? 'STÁHNOUT A IMPORTOVAT'
-                          : 'AKTUALIZOVAT'),
+                      label: Text(
+                        result == null
+                            ? 'STÁHNOUT A IMPORTOVAT'
+                            : 'AKTUALIZOVAT',
+                      ),
                     ),
                   ],
                 ),
@@ -936,6 +1084,8 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
   Stop? _nearestStop;
   double? _distanceMetres;
   String? _locationError;
+  String? _departuresError;
+  List<DepartureInfo> _departures = const [];
   bool _loading = true;
 
   @override
@@ -962,8 +1112,10 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
       final uniqueStops = <String, Stop>{};
       for (final line in lines) {
         for (final stop in line.stops) {
-          if (stop.latitude != null && stop.longitude != null) {
-            uniqueStops[stop.name] = stop;
+          if (stop.latitude != null &&
+              stop.longitude != null &&
+              (stop.latitude != 0 || stop.longitude != 0)) {
+            uniqueStops[stop.id ?? stop.name] = stop;
           }
         }
       }
@@ -981,10 +1133,13 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
           nearestDistance = distance;
         }
       }
+      if (nearest == null) throw Exception('V databázi nejsou zastávky s GPS.');
+      final departures = await _loadDepartures(nearest);
       if (!mounted) return;
       setState(() {
         _nearestStop = nearest;
         _distanceMetres = nearestDistance;
+        _departures = departures;
         _loading = false;
       });
     } catch (error) {
@@ -996,20 +1151,56 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
     }
   }
 
-  List<(TransitLine, int)> get _departures {
-    final stop = _nearestStop;
-    if (stop == null) return [];
-    final now = DateTime.now();
-    final rows = <(TransitLine, int)>[];
-    for (final line in lines) {
-      final index = line.stops.indexWhere((item) => item.name == stop.name);
-      if (index >= 0) {
-        final nextQuarter = ((now.minute ~/ 15) + 1) * 15;
-        rows.add((line, nextQuarter - now.minute + line.stops[index].minutes));
+  Future<List<DepartureInfo>> _loadDepartures(Stop stop) async {
+    try {
+      final rows = await serverSync.fetchDepartures();
+      final departures = <DepartureInfo>[];
+      for (final row in rows) {
+        final lineId = '${row['line_id'] ?? ''}';
+        TransitLine? line;
+        for (final candidate in lines) {
+          if (candidate.id == lineId) line = candidate;
+        }
+        if (line == null) continue;
+
+        final reversed = row['is_reversed'] == true;
+        final route = reversed ? line.stops.reversed.toList() : line.stops;
+        final stopIndex = route.indexWhere(
+          (item) => item.id == stop.id || item.name == stop.name,
+        );
+        if (stopIndex < 0) continue;
+        final startIndex = (row['start_stop_index'] as num?)?.toInt() ?? 0;
+        final endIndex =
+            (row['end_stop_index'] as num?)?.toInt() ?? route.length - 1;
+        if (stopIndex < startIndex || stopIndex > endIndex) continue;
+
+        final rawTime = row['_source'] == 'scheduled_departures'
+            ? row['departure_time']
+            : row['start_time'];
+        final departureTime = DateTime.tryParse('$rawTime')?.toLocal();
+        if (departureTime == null) continue;
+        departures.add(
+          DepartureInfo(
+            line: line,
+            departureTime: departureTime,
+            destination: route[endIndex.clamp(0, route.length - 1)].name,
+            status: '${row['status'] ?? 'scheduled'}',
+          ),
+        );
       }
+      departures.sort((a, b) => a.departureTime.compareTo(b.departureTime));
+      return departures;
+    } catch (error) {
+      _departuresError =
+          'Odjezdy se nepodařilo načíst z databáze: ${error.toString()}';
+      return const [];
     }
-    rows.sort((a, b) => a.$2.compareTo(b.$2));
-    return rows;
+  }
+
+  String _departureLabel(DepartureInfo departure) {
+    if (departure.status == 'active') return 'v provozu';
+    final time = departure.departureTime;
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -1024,8 +1215,10 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
             children: [
               if (_loading) const LinearProgressIndicator(),
               if (_locationError != null) ...[
-                Text(_locationError!,
-                    style: const TextStyle(color: Colors.redAccent)),
+                Text(
+                  _locationError!,
+                  style: const TextStyle(color: Colors.redAccent),
+                ),
                 OutlinedButton.icon(
                   onPressed: _findNearestStop,
                   icon: const Icon(Icons.my_location),
@@ -1033,28 +1226,59 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                 ),
               ],
               if (_nearestStop != null) ...[
-                const Text('Nejbližší zastávka',
-                    style: TextStyle(color: Colors.white60)),
-                Text(_nearestStop!.name,
-                    style: const TextStyle(
-                        fontSize: 28, fontWeight: FontWeight.w800)),
+                const Text(
+                  'Nejbližší zastávka',
+                  style: TextStyle(color: Colors.white60),
+                ),
+                Text(
+                  _nearestStop!.name,
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
                 Text('${math.max(0, _distanceMetres!.round())} m od vás'),
                 const SizedBox(height: 20),
-                const Text('Odjezdy z této zastávky',
-                    style:
-                        TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
-                ..._departures.map((departure) => Card(
-                      child: ListTile(
-                        leading: CircleAvatar(
-                          backgroundColor: departure.$1.color,
-                          child: Text(departure.$1.number),
-                        ),
-                        title: Text(departure.$1.destination),
-                        trailing: Text('${departure.$2} min',
-                            style: const TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.w700)),
+                const Text(
+                  'Odjezdy z této zastávky',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                ),
+                if (_departuresError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 10),
+                    child: Text(
+                      _departuresError!,
+                      style: const TextStyle(color: Colors.redAccent),
+                    ),
+                  ),
+                if (!_loading &&
+                    _departures.isEmpty &&
+                    _departuresError == null)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 14),
+                    child: Text(
+                      'Pro tuto zastávku nejsou v databázi žádné spoje.',
+                    ),
+                  ),
+                ..._departures.map(
+                  (departure) => Card(
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: departure.line.color,
+                        child: Text(departure.line.number),
                       ),
-                    )),
+                      title: Text(departure.destination),
+                      subtitle: const Text('Data z databáze'),
+                      trailing: Text(
+                        _departureLabel(departure),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               ],
               if (activeTrip.driver != null) ...[
                 const SizedBox(height: 16),
@@ -1062,9 +1286,11 @@ class _NearbyDeparturesScreenState extends State<_NearbyDeparturesScreen> {
                   child: ListTile(
                     leading: const Icon(Icons.person_outline),
                     title: Text(activeTrip.driver!.name),
-                    subtitle: Text(activeTrip.driver!.phone?.isNotEmpty == true
-                        ? 'Řidič spoje • ${activeTrip.driver!.phone}'
-                        : 'Řidič spoje'),
+                    subtitle: Text(
+                      activeTrip.driver!.phone?.isNotEmpty == true
+                          ? 'Řidič spoje • ${activeTrip.driver!.phone}'
+                          : 'Řidič spoje',
+                    ),
                   ),
                 ),
               ],
@@ -1232,10 +1458,14 @@ class _DriverLoginScreenState extends State<DriverLoginScreen> {
         children: [
           DropdownButtonFormField<DriverInfo>(
             decoration: const InputDecoration(
-                labelText: 'Řidič', border: OutlineInputBorder()),
+              labelText: 'Řidič',
+              border: OutlineInputBorder(),
+            ),
             items: transitData.drivers
-                .map((driver) =>
-                    DropdownMenuItem(value: driver, child: Text(driver.name)))
+                .map(
+                  (driver) =>
+                      DropdownMenuItem(value: driver, child: Text(driver.name)),
+                )
                 .toList(),
             onChanged: (value) => setState(() => _driver = value),
           ),
@@ -1269,20 +1499,19 @@ class DriverScreen extends StatefulWidget {
 class _DriverScreenState extends State<DriverScreen> {
   final FlutterTts _tts = FlutterTts();
   final AudioPlayer _gongPlayer = AudioPlayer();
-  TransitLine _line = lines.first;
+  TransitLine? _line;
   int _stopIndex = 0;
+  int _startStopIndex = 0;
+  int _endStopIndex = 0;
   bool _running = false;
 
-  Stop get _current => _line.stops[_stopIndex];
+  Stop get _current => _line!.stops[_stopIndex];
   Stop? get _next =>
-      _stopIndex + 1 < _line.stops.length ? _line.stops[_stopIndex + 1] : null;
+      _stopIndex + 1 <= _endStopIndex ? _line!.stops[_stopIndex + 1] : null;
 
   @override
   void initState() {
     super.initState();
-    _line = activeTrip.line;
-    _stopIndex = activeTrip.stopIndex;
-    _running = activeTrip.running;
     _configureAnnouncements();
   }
 
@@ -1293,14 +1522,13 @@ class _DriverScreenState extends State<DriverScreen> {
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       await _tts.setSharedInstance(true);
       await _tts.setIosAudioCategory(
-        IosTextToSpeechAudioCategory.playback,
-        [
-          IosTextToSpeechAudioCategoryOptions.allowBluetooth,
-          IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
-          IosTextToSpeechAudioCategoryOptions.duckOthers,
-        ],
-        IosTextToSpeechAudioMode.spokenAudio,
-      );
+          IosTextToSpeechAudioCategory.playback,
+          [
+            IosTextToSpeechAudioCategoryOptions.allowBluetooth,
+            IosTextToSpeechAudioCategoryOptions.allowBluetoothA2DP,
+            IosTextToSpeechAudioCategoryOptions.duckOthers,
+          ],
+          IosTextToSpeechAudioMode.spokenAudio);
     } else if (defaultTargetPlatform == TargetPlatform.android) {
       await _tts.setAudioAttributesForNavigation();
     }
@@ -1312,7 +1540,7 @@ class _DriverScreenState extends State<DriverScreen> {
   }
 
   Future<void> _announceArrival() async {
-    final lineId = _line.id;
+    final lineId = _line?.id;
     final gongUrl = lineId == null ? null : transitData.lineGongs[lineId];
     if (gongUrl != null && gongUrl.isNotEmpty) {
       try {
@@ -1336,6 +1564,13 @@ class _DriverScreenState extends State<DriverScreen> {
     if (_next == null) {
       await _speak('Konečná zastávka. Prosíme, vystupte.');
       setState(() => _running = false);
+      activeTrip.update(
+        _line!,
+        _stopIndex,
+        false,
+        startStopIndex: _startStopIndex,
+        endStopIndex: _endStopIndex,
+      );
       return;
     }
     final nextName = _next!.name;
@@ -1343,7 +1578,13 @@ class _DriverScreenState extends State<DriverScreen> {
       _stopIndex++;
       _running = true;
     });
-    activeTrip.update(_line, _stopIndex, _running);
+    activeTrip.update(
+      _line!,
+      _stopIndex,
+      _running,
+      startStopIndex: _startStopIndex,
+      endStopIndex: _endStopIndex,
+    );
     await _speak('Příští zastávka $nextName.');
   }
 
@@ -1352,9 +1593,35 @@ class _DriverScreenState extends State<DriverScreen> {
     setState(() {
       _line = line;
       _stopIndex = 0;
+      _startStopIndex = 0;
+      _endStopIndex = line.stops.length - 1;
       _running = false;
     });
-    activeTrip.update(_line, _stopIndex, _running);
+  }
+
+  void _selectStart(int? index) {
+    if (index == null) return;
+    setState(() {
+      _startStopIndex = index;
+      _stopIndex = index;
+      if (_endStopIndex < index) _endStopIndex = _line!.stops.length - 1;
+    });
+  }
+
+  void _startTrip() {
+    final line = _line;
+    if (line == null) return;
+    setState(() {
+      _stopIndex = _startStopIndex;
+      _running = true;
+    });
+    activeTrip.update(
+      line,
+      _stopIndex,
+      true,
+      startStopIndex: _startStopIndex,
+      endStopIndex: _endStopIndex,
+    );
   }
 
   @override
@@ -1373,9 +1640,8 @@ class _DriverScreenState extends State<DriverScreen> {
               children: [
                 Expanded(
                   child: DropdownButtonFormField<TransitLine>(
-                    initialValue: _line,
                     decoration: const InputDecoration(
-                      labelText: 'Linka / odjezd',
+                      labelText: 'Nejprve vyberte linku',
                       border: OutlineInputBorder(),
                     ),
                     items: lines
@@ -1391,97 +1657,167 @@ class _DriverScreenState extends State<DriverScreen> {
                     onChanged: _selectLine,
                   ),
                 ),
-                const SizedBox(width: 12),
-                Container(
-                  width: 74,
-                  height: 64,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: _line.color,
-                    borderRadius: BorderRadius.circular(14),
-                  ),
-                  child: Text(
-                    _line.number,
-                    style: const TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.w900,
+                if (_line != null) ...[
+                  const SizedBox(width: 12),
+                  Container(
+                    width: 74,
+                    height: 64,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _line!.color,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Text(
+                      _line!.number,
+                      style: const TextStyle(
+                        fontSize: 36,
+                        fontWeight: FontWeight.w900,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
-            const SizedBox(height: 18),
-            _StopCard(label: 'AKTUÁLNÍ ZASTÁVKA', stop: _current.name),
-            const SizedBox(height: 12),
-            _StopCard(
-              label: 'NÁSLEDUJE',
-              stop: _next?.name ?? 'Konečná zastávka',
-              accent: true,
-            ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _announceArrival,
-                    icon: const Icon(Icons.volume_up),
-                    label: const Text('PŘÍJEZD'),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size.fromHeight(64),
+            if (_line == null)
+              const Padding(
+                padding: EdgeInsets.only(top: 24),
+                child: Text(
+                  'Po přihlášení není spuštěný žádný spoj. Vyberte linku a úsek trasy.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 18, color: Colors.white70),
+                ),
+              )
+            else ...[
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<int>(
+                      initialValue: _startStopIndex,
+                      decoration: const InputDecoration(
+                        labelText: 'Začátek trasy',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: List.generate(
+                        _line!.stops.length,
+                        (index) => DropdownMenuItem(
+                          value: index,
+                          child: Text(_line!.stops[index].name),
+                        ),
+                      ),
+                      onChanged: _running ? null : _selectStart,
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _depart,
-                    icon: const Icon(Icons.directions_bus),
-                    label: Text(_next == null ? 'UKONČIT' : 'ODJEZD'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFFF9A825),
-                      foregroundColor: Colors.black,
-                      minimumSize: const Size.fromHeight(64),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: DropdownButtonFormField<int>(
+                      key: ValueKey('end-${_line!.id}-$_startStopIndex'),
+                      initialValue: _endStopIndex,
+                      decoration: const InputDecoration(
+                        labelText: 'Konec trasy',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (var index = _startStopIndex;
+                            index < _line!.stops.length;
+                            index++)
+                          DropdownMenuItem(
+                            value: index,
+                            child: Text(_line!.stops[index].name),
+                          ),
+                      ],
+                      onChanged: _running
+                          ? null
+                          : (index) => setState(() => _endStopIndex = index!),
                     ),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            LinearProgressIndicator(
-              value: _stopIndex / (_line.stops.length - 1),
-              minHeight: 9,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _running ? 'Spoj je v provozu' : 'Připraven k odjezdu',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: _running ? Colors.greenAccent : Colors.white70,
-                fontWeight: FontWeight.w600,
+                ],
               ),
-            ),
-            const SizedBox(height: 18),
-            ...List.generate(_line.stops.length, (index) {
-              final stop = _line.stops[index];
-              final passed = index < _stopIndex;
-              final active = index == _stopIndex;
-              return ListTile(
-                leading: Icon(
-                  active ? Icons.radio_button_checked : Icons.circle_outlined,
-                  color: passed
-                      ? Colors.white30
-                      : (active ? Colors.amber : Colors.white70),
+              const SizedBox(height: 14),
+              if (!_running)
+                FilledButton.icon(
+                  onPressed: _startTrip,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('ZAHÁJIT SPOJ'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(58),
+                    backgroundColor: Colors.green,
+                  ),
                 ),
-                title: Text(stop.name),
-                trailing: Text('+${stop.minutes} min'),
-                textColor: passed ? Colors.white38 : Colors.white,
-                onTap: () {
-                  setState(() => _stopIndex = index);
-                  activeTrip.update(_line, _stopIndex, _running);
-                },
-              );
-            }),
+              if (_running) ...[
+                const SizedBox(height: 18),
+                _StopCard(label: 'AKTUÁLNÍ ZASTÁVKA', stop: _current.name),
+                const SizedBox(height: 12),
+                _StopCard(
+                  label: 'NÁSLEDUJE',
+                  stop: _next?.name ?? 'Konečná zastávka',
+                  accent: true,
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _announceArrival,
+                        icon: const Icon(Icons.volume_up),
+                        label: const Text('PŘÍJEZD'),
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size.fromHeight(64),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: _depart,
+                        icon: const Icon(Icons.directions_bus),
+                        label: Text(_next == null ? 'UKONČIT' : 'ODJEZD'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: const Color(0xFFF9A825),
+                          foregroundColor: Colors.black,
+                          minimumSize: const Size.fromHeight(64),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                LinearProgressIndicator(
+                  value: (_stopIndex - _startStopIndex) /
+                      math.max(1, _endStopIndex - _startStopIndex),
+                  minHeight: 9,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Spoj je v provozu',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.greenAccent,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 18),
+              ...List.generate(_line!.stops.length, (index) {
+                final stop = _line!.stops[index];
+                final outside =
+                    index < _startStopIndex || index > _endStopIndex;
+                final passed = _running && index < _stopIndex;
+                final active = index == _stopIndex;
+                return ListTile(
+                  leading: Icon(
+                    active ? Icons.radio_button_checked : Icons.circle_outlined,
+                    color: outside || passed
+                        ? Colors.white30
+                        : (active ? Colors.amber : Colors.white70),
+                  ),
+                  title: Text(stop.name),
+                  trailing: Text('+${stop.minutes} min'),
+                  textColor: outside || passed ? Colors.white38 : Colors.white,
+                );
+              }),
+            ],
           ],
         ),
       ),

@@ -5,6 +5,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 typedef RemoteTripHandler = void Function({
   required String lineNumber,
   required int stopIndex,
+  required int startStopIndex,
+  required int endStopIndex,
   required bool running,
   String? driverId,
 });
@@ -36,6 +38,8 @@ class ServerSyncService {
   Future<void> publishTrip({
     required String lineNumber,
     required int stopIndex,
+    required int startStopIndex,
+    required int endStopIndex,
     required bool running,
     String? driverId,
   }) async {
@@ -44,6 +48,8 @@ class ServerSyncService {
       'id': 'main',
       'line_number': lineNumber,
       'stop_index': stopIndex,
+      'start_stop_index': startStopIndex,
+      'end_stop_index': endStopIndex,
       'running': running,
       'driver_id': driverId,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
@@ -60,6 +66,32 @@ class ServerSyncService {
     if (!_initialized) return [];
     final rows = await _client.from('lines').select().order('name');
     return List<Map<String, dynamic>>.from(rows);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchDepartures() async {
+    if (!_initialized) return [];
+    final cutoff = DateTime.now()
+        .toUtc()
+        .subtract(const Duration(minutes: 5))
+        .toIso8601String();
+    final scheduled = await _client
+        .from('scheduled_departures')
+        .select()
+        .gte('departure_time', cutoff)
+        .order('departure_time')
+        .limit(500);
+    final shifts = await _client
+        .from('shifts')
+        .select()
+        .inFilter('status', const ['active', 'scheduled'])
+        .order('start_time')
+        .limit(500);
+    return [
+      ...List<Map<String, dynamic>>.from(scheduled)
+          .map((row) => {...row, '_source': 'scheduled_departures'}),
+      ...List<Map<String, dynamic>>.from(shifts)
+          .map((row) => {...row, '_source': 'shifts'}),
+    ];
   }
 
   Future<void> saveStop(Map<String, dynamic> stop) async {
@@ -101,9 +133,7 @@ class ServerSyncService {
   Future<Map<String, String>> fetchLineGongs() async {
     if (!_initialized) return {};
     final rows = await _client.from('line_gongs').select();
-    return {
-      for (final row in rows) '${row['line_id']}': '${row['audio_url']}',
-    };
+    return {for (final row in rows) '${row['line_id']}': '${row['audio_url']}'};
   }
 
   Future<void> saveLineGong(String lineId, String audioUrl) async {
@@ -123,28 +153,38 @@ class ServerSyncService {
     await _client.from('prague_stops').delete().neq('id', '');
     await _client.from('prague_lines').delete().neq('id', '');
     for (var index = 0; index < stops.length; index += 500) {
-      final chunk = stops.skip(index).take(500).map((row) => {
-            'id': row['stop_id'],
-            'name': row['stop_name'],
-            'latitude': double.tryParse('${row['stop_lat']}'),
-            'longitude': double.tryParse('${row['stop_lon']}'),
-            'zone': row['zone_id'],
-            'location_type': int.tryParse('${row['location_type']}') ?? 0,
-            'parent_station': '${row['parent_station']}'.isEmpty
-                ? null
-                : row['parent_station'],
-          });
+      final chunk = stops
+          .skip(index)
+          .take(500)
+          .map(
+            (row) => {
+              'id': row['stop_id'],
+              'name': row['stop_name'],
+              'latitude': double.tryParse('${row['stop_lat']}'),
+              'longitude': double.tryParse('${row['stop_lon']}'),
+              'zone': row['zone_id'],
+              'location_type': int.tryParse('${row['location_type']}') ?? 0,
+              'parent_station': '${row['parent_station']}'.isEmpty
+                  ? null
+                  : row['parent_station'],
+            },
+          );
       await _client.from('prague_stops').upsert(chunk.toList());
     }
     for (var index = 0; index < routes.length; index += 500) {
-      final chunk = routes.skip(index).take(500).map((row) => {
-            'id': row['route_id'],
-            'short_name': row['route_short_name'],
-            'long_name': row['route_long_name'] ?? '',
-            'route_type': int.tryParse('${row['route_type']}'),
-            'color': row['route_color'],
-            'text_color': row['route_text_color'],
-          });
+      final chunk = routes
+          .skip(index)
+          .take(500)
+          .map(
+            (row) => {
+              'id': row['route_id'],
+              'short_name': row['route_short_name'],
+              'long_name': row['route_long_name'] ?? '',
+              'route_type': int.tryParse('${row['route_type']}'),
+              'color': row['route_color'],
+              'text_color': row['route_text_color'],
+            },
+          );
       await _client.from('prague_lines').upsert(chunk.toList());
     }
   }
@@ -162,6 +202,8 @@ class ServerSyncService {
           onTrip(
             lineNumber: row['line_number'] as String,
             stopIndex: row['stop_index'] as int,
+            startStopIndex: row['start_stop_index'] as int? ?? 0,
+            endStopIndex: row['end_stop_index'] as int? ?? 0,
             running: row['running'] as bool,
             driverId: row['driver_id'] as String?,
           );
