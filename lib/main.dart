@@ -1517,7 +1517,8 @@ class _DriverScreenState extends State<DriverScreen> {
 
   Future<void> _configureAnnouncements() async {
     await _tts.setLanguage('cs-CZ');
-    await _tts.setSpeechRate(0.46);
+    await _tts.setSpeechRate(0.43);
+    await _tts.setPitch(1.0);
     await _tts.setVolume(1.0);
     if (defaultTargetPlatform == TargetPlatform.iOS) {
       await _tts.setSharedInstance(true);
@@ -1531,6 +1532,48 @@ class _DriverScreenState extends State<DriverScreen> {
           IosTextToSpeechAudioMode.spokenAudio);
     } else if (defaultTargetPlatform == TargetPlatform.android) {
       await _tts.setAudioAttributesForNavigation();
+    }
+    await _selectBestCzechSystemVoice();
+  }
+
+  Future<void> _selectBestCzechSystemVoice() async {
+    try {
+      final voices = await _tts.getVoices;
+      if (voices is! List) return;
+      final czechVoices = voices.whereType<Map>().where((voice) {
+        final locale =
+            '${voice['locale'] ?? ''}'.replaceAll('_', '-').toLowerCase();
+        return locale == 'cs-cz' || locale.startsWith('cs-');
+      }).toList();
+      if (czechVoices.isEmpty) return;
+
+      int voiceScore(Map voice) {
+        final description = voice.values.join(' ').toLowerCase();
+        var score = 0;
+        if (description.contains('natural')) score += 100;
+        if (description.contains('premium')) score += 90;
+        if (description.contains('enhanced')) score += 80;
+        if (description.contains('network')) score += 60;
+        if (description.contains('google')) score += 50;
+        if (description.contains('zuzana') || description.contains('iveta')) {
+          score += 40;
+        }
+        if (description.contains('compact')) score -= 20;
+        if (description.contains('espeak') || description.contains('robot')) {
+          score -= 100;
+        }
+        return score;
+      }
+
+      czechVoices.sort((a, b) => voiceScore(b).compareTo(voiceScore(a)));
+      final selected = czechVoices.first;
+      final name = selected['name'];
+      final locale = selected['locale'];
+      if (name != null && locale != null) {
+        await _tts.setVoice({'name': '$name', 'locale': '$locale'});
+      }
+    } catch (_) {
+      // Když přístroj nenabízí seznam hlasů, použije se výchozí český hlas OS.
     }
   }
 
@@ -1550,7 +1593,20 @@ class _DriverScreenState extends State<DriverScreen> {
         // Hlášení názvu zastávky pokračuje i při nedostupném gongu.
       }
     }
-    await _speak('${_current.name}.');
+    final isSelectedTerminal = _stopIndex == _endStopIndex;
+    final isShortenedTrip =
+        isSelectedTerminal && _endStopIndex < _line!.stops.length - 1;
+    if (isShortenedTrip) {
+      await _speak(
+        '${_current.name}. Upozorňujeme cestující, že tento spoj končí jízdu v zastávce ${_current.name}.',
+      );
+    } else if (isSelectedTerminal) {
+      await _speak(
+        '${_current.name}. Konečná zastávka, prosíme, vystupte.',
+      );
+    } else {
+      await _speak('${_current.name}.');
+    }
   }
 
   @override
@@ -1562,7 +1618,6 @@ class _DriverScreenState extends State<DriverScreen> {
 
   Future<void> _depart() async {
     if (_next == null) {
-      await _speak('Konečná zastávka. Prosíme, vystupte.');
       setState(() => _running = false);
       activeTrip.update(
         _line!,
